@@ -6,15 +6,14 @@ mod utils;
 
 use actix_web::{web, App, HttpServer, middleware};
 use dotenv::dotenv;
-use crate::db::init_db;
+use crate::db::init_database;
 use crate::middlewares::jwt::JwtMiddleware; 
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     dotenv().ok(); // Load .env file
 
-    let db = init_db().await;
-    // let jwt_middleware = JwtMiddleware::new();
+    let db = init_database().await;
     
     HttpServer::new(move || {
         App::new()
@@ -23,8 +22,8 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(db.clone()))
             .route("/register", web::post().to(handlers::auth::register_user))
             .route("/login", web::post().to(handlers::auth::login_user))
-            .route("/forgot_password", web::post().to(handlers::auth::forgot_password))
-            .route("/reset_password", web::post().to(handlers::auth::reset_password))
+            // .route("/forgot_password", web::post().to(handlers::auth::forgot_password))
+            // .route("/reset_password", web::post().to(handlers::auth::reset_password))
             // Define more routes as needed
     })
     .bind("127.0.0.1:8080")?

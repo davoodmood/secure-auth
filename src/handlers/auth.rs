@@ -17,6 +17,7 @@ pub async fn register_user(db: web::Data<Database>, form: web::Json<User>) -> Ht
         id: None,
         username: form.username.clone(),
         password: hashed_password,
+        email: form.email.clone(),
         // Initialize other fields as needed
     };
 
