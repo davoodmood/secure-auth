@@ -1,23 +1,25 @@
-use actix_web::{web, App, HttpServer, middleware};
-use dotenv::dotenv;
-
 mod db;
 mod models;
 mod handlers;
 mod middlewares;
 mod utils;
 
+use actix_web::{web, App, HttpServer, middleware};
+use dotenv::dotenv;
+use crate::db::init_db;
+use crate::middlewares::jwt::JwtMiddleware; 
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     dotenv().ok(); // Load .env file
 
-    let db = db::init_database().await;
-
+    let db = init_db().await;
+    // let jwt_middleware = JwtMiddleware::new();
+    
     HttpServer::new(move || {
         App::new()
             .wrap(middleware::Logger::default())
-            .wrap(middlewares::jwt::JwtMiddleware)
+            .wrap(JwtMiddleware)
             .app_data(web::Data::new(db.clone()))
             .route("/register", web::post().to(handlers::auth::register_user))
             .route("/login", web::post().to(handlers::auth::login_user))

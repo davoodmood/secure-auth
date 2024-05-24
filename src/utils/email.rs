@@ -10,7 +10,7 @@ pub fn send_reset_email(email: &str, token: &str) -> Result<(), lettre::error::E
         .unwrap();
 
     let mailer = SmtpTransport::relay("smtp.yourprovider.com").unwrap().build();
-    mailer.send(&email)?;
+    mailer.send(&email);
 
     Ok(())
 }
