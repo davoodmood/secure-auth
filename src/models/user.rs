@@ -10,6 +10,6 @@ pub struct User {
     pub email: String,
     // pub mfa_enabled: bool,
     // pub mfa_secret: Option<String>,  // This will store the TOTP secret, empty if MFA is not enabled
-
+    // pub optedOutMarketingEmails: String,
     // Add other fields as necessary
 }

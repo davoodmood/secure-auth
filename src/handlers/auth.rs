@@ -49,7 +49,7 @@ pub async fn forgot_password<ForgotPasswordRequest>(db: web::Data<Database>, for
     let user = collection.find_one(doc! { "email": "some-email" }, None).await.unwrap();
 
     if let Some(user) = user {
-        let reset_token = create_reset_token(&user.email).unwrap();
+        let reset_token: String = create_reset_token(&user.email).unwrap();
         send_reset_email(&user.email, &reset_token).unwrap();  // Handle errors appropriately in production
 
         HttpResponse::Ok().json(json!({
