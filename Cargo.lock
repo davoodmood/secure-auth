@@ -2001,8 +2001,10 @@ dependencies = [
  "otpauth",
  "qrcode",
  "rand",
+ "regex",
  "serde",
  "serde_json",
+ "thiserror",
 ]
 
 [[package]]
