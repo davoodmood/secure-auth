@@ -19,7 +19,7 @@ async fn main() -> std::io::Result<()> {
         App::new()
             .wrap(middleware::Logger::default())
             .app_data(web::Data::new(db.clone()))
-            // .wrap(JwtMiddleware)
+            .wrap(JwtMiddleware)
             .route("/register", web::post().to(handlers::auth::register_user))
             .route("/login", web::post().to(handlers::auth::login_user))            
             .route("/forgot_password", web::post().to(handlers::auth::forgot_password))

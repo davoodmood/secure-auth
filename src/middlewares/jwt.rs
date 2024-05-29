@@ -80,10 +80,18 @@ where
         // If it's a public route, proceed without JWT verification
         if is_public_route {
             let fut = self.service.call(req);
-            return Box::pin(async move { fut.await.map(|res| res.map_into_right_body()) })
+            return Box::pin(async move {
+                match fut.await {
+                    Ok(res) => {
+                        let res = res.map_into_left_body();
+                        Ok(res)
+                    }
+                    Err(err) => Err(err),
+                }
+            })
         }
 
-        // Extract JWT token from request headers
+        // If Request is from a protected route, extract JWT token from request headers
         let auth_header = req.headers().get(header::AUTHORIZATION).cloned();
 
         if auth_header.is_none() {
