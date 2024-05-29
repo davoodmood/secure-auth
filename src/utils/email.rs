@@ -9,14 +9,15 @@ use lettre::transport::smtp::{
     }
 };
 
-pub fn send_reset_email(email: &str, token: &str) -> Result<(), lettre::error::Error> {
+pub async fn send_reset_email(email: &str, token: &str) -> Result<(), lettre::error::Error> {
     // Fetch SMTP server endpoint, username, and password from environment variables
-    println!("starting sending email process");
+
     let smtp_server = env::var("SMTP_SERVER").expect("SMTP_SERVER environment variable not set");
     let smtp_username = env::var("SMTP_USERNAME").expect("SMTP_USERNAME environment variable not set");
     let smtp_password = env::var("SMTP_PASSWORD").expect("SMTP_PASSWORD environment variable not set");
     let server_domain = env::var("SERVER_DOMAIN").expect("SERVER_DOMAIN environment variable not set");
     
+    // Set the email body & message
     let from_address = format!("no-reply@{}", server_domain);
     let email_body = format!("Please use the following link to reset your password: https://{}/reset_password?token={}", server_domain, token);
     let email = Message::builder()
@@ -26,13 +27,12 @@ pub fn send_reset_email(email: &str, token: &str) -> Result<(), lettre::error::E
         .body(email_body)
         .unwrap();
 
-    println!("starting sending email process: email built");
+    // Set the TLS-Required Parameters
     let tls_parameters = TlsParameters::builder(smtp_server.clone())
         .build()
         .unwrap();
 
-    
-    println!("starting sending email process: tls_parameters built");
+    // Setup the SMTP Transport with Aha-Send SMTP-Server Relayer
     let mailer = SmtpTransport::relay(&smtp_server)
     .unwrap()
     .port(587)
@@ -41,8 +41,7 @@ pub fn send_reset_email(email: &str, token: &str) -> Result<(), lettre::error::E
     .authentication(vec![Mechanism::Plain]) // Set the authentication method to PLAIN
     .build();
 
-    println!("starting sending email process: mailer built");
-
+    // Send the email
     match mailer.send(&email) {
         Ok(_) => {
             info!("Email sent successfully");

@@ -323,13 +323,13 @@ pub async fn forgot_password(db: web::Data<Database>, form: web::Json<ForgotPass
     };
     
     // Create reset token
-    let reset_token = match create_reset_token(&user.email) {
+    let reset_token = match create_reset_token(&user.email, &db).await {
         Ok(token) => token,
         Err(_) => return HttpResponse::InternalServerError().finish(),
     };
     
     // Send reset email
-    match send_reset_email(&user.email, &reset_token) {
+    match send_reset_email(&user.email, &reset_token).await {
         Ok(_) => HttpResponse::Ok().json(json!({
             "message": "If your email is registered with us, you will receive a password reset link."
         })),

@@ -1,3 +1,4 @@
+// use chrono::{DateTime, Utc};
 use serde::{Serialize, Deserialize};
 use mongodb::bson::oid::ObjectId;
 
@@ -14,6 +15,8 @@ pub struct User {
     pub user_verified: Option<bool>,
     pub mfa_enabled: Option<bool>,
     pub mfa_secret: Option<String>,  // This will store the TOTP secret, empty if MFA is not enabled
-    // pub optedOutMarketingEmails: String,
+    // pub optedOutMarketingEmails: Option<String>,
+    // pub failed_login_attempts: Option<i32>,
+    // pub lockout_until: Option<DateTime<Utc>>,
     // Add other fields as necessary
 }
