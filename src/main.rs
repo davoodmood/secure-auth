@@ -6,12 +6,16 @@ mod utils;
 
 use actix_web::{web, App, HttpServer, middleware};
 use dotenv::dotenv;
+use env_logger;
 use crate::db::init_database;
 use crate::middlewares::jwt::JwtMiddleware; 
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     dotenv().ok(); // Load .env file
+    std::env::set_var("RUST_LOG", "debug");
+    std::env::set_var("RUST_BACKTRACE", "1");
+    env_logger::init();
 
     let db = init_database().await;
     
@@ -21,7 +25,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(db.clone()))
             .wrap(JwtMiddleware)
             .route("/register", web::post().to(handlers::auth::register_user))
-            .route("/login", web::post().to(handlers::auth::login_user))            
+            .route("/login", web::post().to(handlers::auth::login_user))
             .route("/forgot_password", web::post().to(handlers::auth::forgot_password))
             .route("/reset_password", web::post().to(handlers::auth::reset_password))
             // Define more routes as needed

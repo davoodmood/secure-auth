@@ -1,15 +1,41 @@
+use log::{error, info};
+use std::env;
 use lettre::{Message, SmtpTransport, Transport};
+use lettre::transport::smtp::authentication::{Credentials, Mechanism};
 
 pub fn send_reset_email(email: &str, token: &str) -> Result<(), lettre::error::Error> {
-    let email_body = format!("Please use the following link to reset your password: https://yourdomain.com/reset_password?token={}", token);
+    // Fetch SMTP server endpoint, username, and password from environment variables
+    println!("starting sending email process");
+    let smtp_server = env::var("SMTP_SERVER").expect("SMTP_SERVER environment variable not set");
+    let smtp_username = env::var("SMTP_USERNAME").expect("SMTP_USERNAME environment variable not set");
+    let smtp_password = env::var("SMTP_PASSWORD").expect("SMTP_PASSWORD environment variable not set");
+    println!("starting sending email process. env vars retreived.");
+    let email_body = format!("Please use the following link to reset your password: http://localhost:8080/reset_password?token={}", token);
     let email = Message::builder()
         .from("no-reply@yourdomain.com".parse().unwrap())
         .to(email.parse().unwrap())
         .subject("Password Reset Request")
         .body(email_body)
         .unwrap();
+    
+    println!("starting sending email process: email built");
+    let mailer = SmtpTransport::relay(&smtp_server)
+    .unwrap()
+    .port(587)
+    .credentials(Credentials::new(smtp_username, smtp_password))
+    .authentication(vec![Mechanism::Plain]) // Set the authentication method to PLAIN
+    .build();
 
-    let mailer = SmtpTransport::relay("smtp.yourprovider.com").unwrap().build();
-    let _ = mailer.send(&email);
-    Ok(())
+    println!("starting sending email process: mailer built");
+
+    match mailer.send(&email) {
+        Ok(_) => {
+            info!("Email sent successfully");
+            Ok(())
+        }
+        Err(e) => {
+            error!("Failed to send email: {:?}", e);
+            Ok(())
+        }
+    }
 }

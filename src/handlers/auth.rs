@@ -52,11 +52,47 @@ impl Password {
 }
 
 
+#[derive(Clone)]
+struct PhoneNumber(String);
+
+impl PhoneNumber {
+    pub fn new(phone: &str) -> Result<Self, &'static str> {
+        if validate_phone_number(phone) {
+            Ok(Self(phone.to_string()))
+        } else {
+            Err("Invalid phone number format")
+        }
+    }
+}
+
+impl From<&PhoneNumber> for Bson {
+    fn from(phone: &PhoneNumber) -> Bson {
+        Bson::String(phone.0.clone())
+    }
+}
+
+fn validate_phone_number(phone: &str) -> bool {
+    let mut chars = phone.chars();
+    let valid_chars: Vec<char> = "0123456789+".chars().collect();
+    let has_plus = chars.next() == Some('+');
+
+    if has_plus && chars.all(|c| valid_chars.contains(&c)) {
+        true
+    } else if !has_plus && chars.all(|c| valid_chars.contains(&c)) {
+        true
+    } else {
+        false
+    }
+}
+
+
+
 #[derive(Deserialize)]
 pub struct UserRequest {
     username: String,
     email: String,
     password: String,
+    phone: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -70,6 +106,7 @@ pub async fn register_user(
     user_req: web::Json<UserRequest>,
     db: web::Data<Database>,
 ) -> impl Responder {
+
     let username = match Username::new(&user_req.username) {
         Ok(username) => username,
         Err(err) => return HttpResponse::BadRequest().body(err),
@@ -85,6 +122,52 @@ pub async fn register_user(
         Err(err) => return HttpResponse::BadRequest().body(err),
     };
 
+    let phone = match &user_req.phone {
+        Some(phone) => {
+            if !validate_phone_number(phone) {
+                return HttpResponse::BadRequest().body("Invalid phone number");
+            }
+            Some(PhoneNumber::new(phone).unwrap())
+        }
+        None => None,
+    };
+
+
+    // Check if username or email already exist in the database
+    let mut existing_user_filter = doc! {
+        "$or": [
+            {"username": &username.0},
+            {"email": &email.0},
+        ]
+    };
+    
+    // If phone number is provided, include it in the filter
+    if let Some(phone) = &phone {
+        if let Ok(or_array) = existing_user_filter.get_array_mut("$or") {
+            or_array.push(doc! {"phone": phone}.into());
+        }
+    }
+
+    let existing_user = db
+        .collection::<User>("users")
+        .find_one(existing_user_filter, None)
+        .await;
+
+    match existing_user {
+        Ok(Some(_)) => {
+            // An existing user with the provided email, username, or phone already exists
+            return HttpResponse::BadRequest().body("User with provided email, username, or phone already exists");
+        }
+        Err(_) => {
+            // Error occurred while querying the database
+            return HttpResponse::InternalServerError().finish();
+        }
+        _ => {
+            // No existing user found, continue with user creation
+        }
+    };
+
+
     // Hash the user's password
     let hashed_password = match hash(&password.0, DEFAULT_COST) {
         Ok(hp) => hp,
@@ -92,12 +175,15 @@ pub async fn register_user(
     };
 
     // Create the user document to insert into MongoDB
-    let new_user_doc = doc! {
+    let mut new_user_doc = doc! {
         "username": username.0.clone(),
         "email": email.0.clone(),
         "password": hashed_password,
     };
 
+    if let Some(phone) = phone {
+        new_user_doc.insert("phone", phone.0);
+    }
 
     // Insert the new user into the database
     match db
@@ -175,11 +261,16 @@ pub async fn login_user(db: web::Data<Database>, form: web::Json<UserLogin>) -> 
             { "email": &form.identifier }
         ]
     };
-
     let user = match collection.find_one(filter, None).await {
         Ok(Some(user)) => user,
-        Ok(None) => return HttpResponse::Unauthorized().finish(),
-        Err(_) => return HttpResponse::InternalServerError().finish(),
+        Ok(None) => {
+            println!("User not found");
+            return HttpResponse::Unauthorized().finish();
+        }
+        Err(err) => {
+            println!("Error querying database: {:?}", err);
+            return HttpResponse::InternalServerError().finish();
+        }
     };
 
     if let Ok(valid) = verify(&form.password, &user.password) {
@@ -188,6 +279,7 @@ pub async fn login_user(db: web::Data<Database>, form: web::Json<UserLogin>) -> 
                 Ok(token) => return HttpResponse::Ok().json(TokenResponse { token }),
                 Err(_) => return HttpResponse::InternalServerError().finish(),
             }
+            
         }
     }
 
@@ -234,7 +326,7 @@ pub async fn forgot_password(db: web::Data<Database>, form: web::Json<ForgotPass
         Ok(token) => token,
         Err(_) => return HttpResponse::InternalServerError().finish(),
     };
-
+    println!("before sending email");
     // Send reset email
     match send_reset_email(&user.email, &reset_token) {
         Ok(_) => HttpResponse::Ok().json(json!({
@@ -292,22 +384,31 @@ pub async fn reset_password(db: web::Data<Database>, form: web::Json<ResetPasswo
         Err(_) => return HttpResponse::InternalServerError().finish(),
     };
 
-    if user.password_reset_token != form.reset_token {
-        return HttpResponse::Ok().json(json!({"message": "Invalid reset token"}));
-    }
-
-    let user_id = match user.id.clone() {
-        Some(id) => id,
-        None => {
-            return HttpResponse::InternalServerError().finish();
+    // if user.password_reset_token != form.reset_token {
+    //     return HttpResponse::Ok().json(json!({"message": "Invalid reset token"}));
+    // }
+    
+    match (user.password_reset_token, &form.reset_token) {
+        (Some(user_token), form_token) if user_token == *form_token => {
+            // Tokens match, proceed with password reset
+            let user_id = match user.id.clone() {
+                Some(id) => id,
+                None => {
+                    return HttpResponse::InternalServerError().finish();
+                }
+            };
+        
+            // Hash the new password and update the user's password in the database
+            if let Err(_) = update_password(&collection, user_id , &form.new_password).await {
+                return HttpResponse::InternalServerError().finish();
+            }
+        
+            HttpResponse::Ok().json(json!({"message": "Password reset successfully"}))
         }
-    };
-
-    // Hash the new password and update the user's password in the database
-    if let Err(_) = update_password(&collection, user_id , &form.new_password).await {
-        return HttpResponse::InternalServerError().finish();
+        _ => {
+            // Tokens don't match or one of them is None
+            return HttpResponse::Ok().json(json!({"message": "Invalid reset token"}));
+        }
     }
-
-    HttpResponse::Ok().json(json!({"message": "Password reset successfully"}))
 }
 
