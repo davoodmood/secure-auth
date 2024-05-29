@@ -8,6 +8,7 @@ pub struct User {
     pub username: String,
     pub password: String, // This will store the hashed password
     pub email: String,
+    pub password_reset_token: String,
     // pub mfa_enabled: bool,
     // pub mfa_secret: Option<String>,  // This will store the TOTP secret, empty if MFA is not enabled
     // pub optedOutMarketingEmails: String,

@@ -1,6 +1,6 @@
 use actix_web::{web, HttpResponse, Responder};
 use mongodb::{
-    bson::{doc, Bson}, Database
+    bson::{doc, oid::ObjectId, Bson}, Database
 };
 use regex::Regex;
 use bcrypt::{hash, DEFAULT_COST, verify};
@@ -125,7 +125,7 @@ pub async fn register_user(
 }
 
 /*
-  LOGIN 
+  LOGIN HANDLER
 */
 
 #[derive(Deserialize)]
@@ -194,30 +194,120 @@ pub async fn login_user(db: web::Data<Database>, form: web::Json<UserLogin>) -> 
     HttpResponse::Unauthorized().finish()
 }
 
-pub async fn forgot_password<ForgotPasswordRequest>(db: web::Data<Database>, form: web::Json<ForgotPasswordRequest>) -> HttpResponse {
-    // let email = form.into_inner();
-    let collection = db.collection::<User>("users");
-    let user = collection.find_one(doc! { "email": "some-email" }, None).await.unwrap();
+/*
+  FORGOT PASSWORD HANDLER
+*/
 
-    if let Some(user) = user {
-        let reset_token: String = create_reset_token(&user.email).unwrap();
-        send_reset_email(&user.email, &reset_token).unwrap();  // Handle errors appropriately in production
+#[derive(Deserialize)]
+pub struct ForgotPasswordRequest {
+    pub email: String,
+}
 
-        HttpResponse::Ok().json(json!({
-            "message": "If your email is registered with us, you will receive a password reset link."
-        }))
-    } else {
-        HttpResponse::Ok().json(json!({
-            "message": "If your email is registered with us, you will receive a password reset link."
-        }))  // Avoid confirming or denying the existence of an account
+#[derive(Debug, Error)]
+enum ForgotPasswordError {
+    #[error("Internal server error")]
+    InternalServerError,
+}
+
+impl From<mongodb::error::Error> for ForgotPasswordError {
+    fn from(_: mongodb::error::Error) -> Self {
+        ForgotPasswordError::InternalServerError
     }
 }
 
-pub async fn reset_password<ResetPasswordRequest>(db: web::Data<Database>, form: web::Json<ResetPasswordRequest>) -> HttpResponse {
+pub async fn forgot_password(db: web::Data<Database>, form: web::Json<ForgotPasswordRequest>) -> HttpResponse {
+    let collection = db.collection::<User>("users");
+
+    // Try to find the user by email
+    let filter = doc! { "email": &form.email };
+
+    let user = match collection.find_one(filter, None).await {
+        Ok(Some(user)) => user,
+        Ok(None) => return HttpResponse::Ok().json(json!({
+            "message": "If your email is registered with us, you will receive a password reset link."
+        })),
+        Err(_) => return HttpResponse::InternalServerError().finish(),
+    };
+
+    // Create reset token
+    let reset_token = match create_reset_token(&user.email) {
+        Ok(token) => token,
+        Err(_) => return HttpResponse::InternalServerError().finish(),
+    };
+
+    // Send reset email
+    match send_reset_email(&user.email, &reset_token) {
+        Ok(_) => HttpResponse::Ok().json(json!({
+            "message": "If your email is registered with us, you will receive a password reset link."
+        })),
+        Err(_) => HttpResponse::InternalServerError().finish(),
+    }
+}
+
+/*
+  RESET PASSWORD HANDLER
+*/
+
+#[derive(Deserialize)]
+pub struct ResetPasswordRequest {
+    pub email: String,
+    pub new_password: String,
+    pub reset_token: String,
+}
+
+#[derive(Debug, Error)]
+enum ResetPasswordError {
+    #[error("Internal server error")]
+    InternalServerError,
+    #[error("Invalid reset token")]
+    InvalidResetToken,
+}
+
+impl From<mongodb::error::Error> for ResetPasswordError {
+    fn from(_: mongodb::error::Error) -> Self {
+        ResetPasswordError::InternalServerError
+    }
+}
+
+async fn find_user_by_email(collection: &mongodb::Collection<User>, email: &str) -> Result<Option<User>, ResetPasswordError> {
+    let filter = doc! { "email": email };
+    collection.find_one(filter, None).await.map_err(|_| ResetPasswordError::InternalServerError)
+}
+
+async fn update_password(collection: &mongodb::Collection<User>, user_id: ObjectId, new_password: &str) -> Result<(), ResetPasswordError> {
+    let filter = doc! { "_id": user_id };
+    let hashed_password = hash(new_password, DEFAULT_COST).map_err(|_| ResetPasswordError::InternalServerError)?;
+    let update = doc! { "$set": { "password": hashed_password } };
+    collection.update_one(filter, update, None).await.map_err(|_| ResetPasswordError::InternalServerError)?;
+    Ok(())
+}
+
+pub async fn reset_password(db: web::Data<Database>, form: web::Json<ResetPasswordRequest>) -> HttpResponse {
+    let collection = db.collection::<User>("users");
+
     // Validate the reset token and extract the email
-    // Find the user by email in the database
+    let user = match find_user_by_email(&collection, &form.email).await {
+        Ok(Some(user)) => user,
+        Ok(None) => return HttpResponse::Ok().json(json!({"message": "Invalid reset token"})),
+        Err(_) => return HttpResponse::InternalServerError().finish(),
+    };
+
+    if user.password_reset_token != form.reset_token {
+        return HttpResponse::Ok().json(json!({"message": "Invalid reset token"}));
+    }
+
+    let user_id = match user.id.clone() {
+        Some(id) => id,
+        None => {
+            return HttpResponse::InternalServerError().finish();
+        }
+    };
+
     // Hash the new password and update the user's password in the database
-    // Respond with a success message
-    HttpResponse::Ok().into()
+    if let Err(_) = update_password(&collection, user_id , &form.new_password).await {
+        return HttpResponse::InternalServerError().finish();
+    }
+
+    HttpResponse::Ok().json(json!({"message": "Password reset successfully"}))
 }
 

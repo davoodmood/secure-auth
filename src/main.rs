@@ -21,10 +21,9 @@ async fn main() -> std::io::Result<()> {
             .app_data(web::Data::new(db.clone()))
             // .wrap(JwtMiddleware)
             .route("/register", web::post().to(handlers::auth::register_user))
-            .route("/login", web::post().to(handlers::auth::login_user))
-            
-            // .route("/forgot_password", web::post().to(handlers::auth::forgot_password))
-            // .route("/reset_password", web::post().to(handlers::auth::reset_password))
+            .route("/login", web::post().to(handlers::auth::login_user))            
+            .route("/forgot_password", web::post().to(handlers::auth::forgot_password))
+            .route("/reset_password", web::post().to(handlers::auth::reset_password))
             // Define more routes as needed
     })
     .bind("127.0.0.1:8080")?

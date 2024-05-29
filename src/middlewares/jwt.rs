@@ -68,6 +68,21 @@ where
     forward_ready!(service);
 
     fn call(&self, req: ServiceRequest) -> Self::Future {
+        // Get the path of the request
+        let path = req.uri().path().to_owned();
+
+        // List of public routes that don't require JWT verification
+        let public_routes = vec!["/register", "/login", "/forgot_password", "/reset_password"];
+
+        // Check if the requested path is in the list of public routes
+        let is_public_route = public_routes.iter().any(|route| path.starts_with(route));
+
+        // If it's a public route, proceed without JWT verification
+        if is_public_route {
+            let fut = self.service.call(req);
+            return Box::pin(async move { fut.await.map(|res| res.map_into_right_body()) })
+        }
+
         // Extract JWT token from request headers
         let auth_header = req.headers().get(header::AUTHORIZATION).cloned();
 
