@@ -35,6 +35,8 @@ pub fn create_reset_token(email: &str) -> Result<String, jsonwebtoken::errors::E
         exp: expiration as usize,
     };
 
+    // set the created token in the user account's database 
+
     let secret = env::var("JWT_RESET_SECRET").expect("JWT_RESET_SECRET must be set");  // Separate secret for reset tokens
     encode(&Header::default(), &claims, &EncodingKey::from_secret(secret.as_ref()))
 }

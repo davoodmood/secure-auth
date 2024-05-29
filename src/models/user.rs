@@ -11,8 +11,9 @@ pub struct User {
     pub phone: Option<String>,
     pub tel: Option<String>,
     pub password_reset_token: Option<String>,
-    // pub mfa_enabled: bool,
-    // pub mfa_secret: Option<String>,  // This will store the TOTP secret, empty if MFA is not enabled
+    pub user_verified: Option<bool>,
+    pub mfa_enabled: Option<bool>,
+    pub mfa_secret: Option<String>,  // This will store the TOTP secret, empty if MFA is not enabled
     // pub optedOutMarketingEmails: String,
     // Add other fields as necessary
 }

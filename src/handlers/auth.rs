@@ -8,6 +8,8 @@ use jsonwebtoken::{encode, Header, EncodingKey};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use thiserror::Error;
+use otpauth::TOTP;
+use qrcode::{QrCode, render::svg};
 
 use crate::models::user::User;
 use crate::utils::{jwt::{Claims, create_token, create_reset_token}, email::send_reset_email};
@@ -312,7 +314,6 @@ pub async fn forgot_password(db: web::Data<Database>, form: web::Json<ForgotPass
 
     // Try to find the user by email
     let filter = doc! { "email": &form.email };
-
     let user = match collection.find_one(filter, None).await {
         Ok(Some(user)) => user,
         Ok(None) => return HttpResponse::Ok().json(json!({
@@ -320,13 +321,13 @@ pub async fn forgot_password(db: web::Data<Database>, form: web::Json<ForgotPass
         })),
         Err(_) => return HttpResponse::InternalServerError().finish(),
     };
-
+    
     // Create reset token
     let reset_token = match create_reset_token(&user.email) {
         Ok(token) => token,
         Err(_) => return HttpResponse::InternalServerError().finish(),
     };
-    println!("before sending email");
+    
     // Send reset email
     match send_reset_email(&user.email, &reset_token) {
         Ok(_) => HttpResponse::Ok().json(json!({
@@ -384,10 +385,6 @@ pub async fn reset_password(db: web::Data<Database>, form: web::Json<ResetPasswo
         Err(_) => return HttpResponse::InternalServerError().finish(),
     };
 
-    // if user.password_reset_token != form.reset_token {
-    //     return HttpResponse::Ok().json(json!({"message": "Invalid reset token"}));
-    // }
-    
     match (user.password_reset_token, &form.reset_token) {
         (Some(user_token), form_token) if user_token == *form_token => {
             // Tokens match, proceed with password reset
@@ -397,11 +394,14 @@ pub async fn reset_password(db: web::Data<Database>, form: web::Json<ResetPasswo
                     return HttpResponse::InternalServerError().finish();
                 }
             };
-        
+            
             // Hash the new password and update the user's password in the database
             if let Err(_) = update_password(&collection, user_id , &form.new_password).await {
                 return HttpResponse::InternalServerError().finish();
             }
+
+            // @dev: TODO: Invalidate the token after usage. 
+            // @dev: TODO: Notify the user of the successful password reset
         
             HttpResponse::Ok().json(json!({"message": "Password reset successfully"}))
         }
@@ -412,3 +412,40 @@ pub async fn reset_password(db: web::Data<Database>, form: web::Json<ResetPasswo
     }
 }
 
+
+/*
+  MFA SETUP HANDLER
+*/
+
+// pub async fn setup_mfa(db: web::Data<Database>, user_id: web::Path<String>) -> HttpResponse {
+//     // Generate a new TOTP secret
+//     let totp = TOTP::new("base32secret3232");
+//     let secret = totp.secret();
+
+//     // Generate a QR code for the secret
+//     let uri = totp.uri("user@example.com", "MyApp");
+//     let code = QrCode::new(uri).unwrap();
+//     let image = code.render::<svg::Color>().build();
+
+//     // Save the secret in the user's profile (after confirmation)
+//     // Respond with the QR code image
+//     HttpResponse::Ok().content_type("image/svg+xml").body(image)
+// }
+
+/*
+  MFA SETUP HANDLER
+*/
+
+// pub async fn verify_mfa(db: web::Data<Database>, user_id: web::Path<String>, form: web::Json<MfaVerificationRequest>) -> HttpResponse {
+//     // Retrieve the user's MFA secret from the database
+//     // Use the otpauth crate to verify the TOTP
+//     let totp = TOTP::from_base32(&user.mfa_secret.unwrap()).unwrap();
+//     let verified = totp.verify(form.totp_code, 30, 0);
+
+//     if verified {
+//         // Proceed with login
+//         HttpResponse::Ok().json({"message": "MFA verification successful"})
+//     } else {
+//         HttpResponse::Unauthorized().json({"message": "MFA verification failed"})
+//     }
+// }
