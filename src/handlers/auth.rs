@@ -1,4 +1,6 @@
-use actix_web::{web, HttpResponse, Responder};
+use std::env;
+
+use actix_web::{http::header, web, HttpResponse, Responder};
 use mongodb::{
     bson::{doc, oid::ObjectId, Bson}, Database
 };
@@ -504,9 +506,15 @@ pub async fn verify_email(db: web::Data<Database>, form: web::Json<VerifyRequest
 
     let filter = doc! { "email_verification_token": &form.token };
     let update = doc! { "$set": { "email_verified": true }, "$unset": { "email_verification_token": "" } };
-
+    let server_domain = env::var("SERVER_DOMAIN").expect("SERVER_DOMAIN environment variable not set");
     match collection.update_one(filter, update, None).await {
-        Ok(result) if result.matched_count > 0 => HttpResponse::Ok().json(json!({"message": "Email verified successfully"})),
+        // Ok(result) if result.matched_count > 0 => HttpResponse::Ok().json(json!({"message": "Email verified successfully"})),
+        Ok(result) if result.matched_count > 0 => {
+            // Redirect to a specific page after successful verification
+            HttpResponse::Found()
+                .append_header((header::LOCATION, format!("https://{}/verification-success", server_domain)))
+                .finish()
+        },
         _ => HttpResponse::BadRequest().json(json!({"message": "Invalid verification token"})),
     }
 }
@@ -518,9 +526,15 @@ pub async fn verify_phone(db: web::Data<Database>, form: web::Json<VerifyRequest
 
     let filter = doc! { "phone_verification_token": &form.token };
     let update = doc! { "$set": { "phone_verified": true }, "$unset": { "phone_verification_token": "" } };
-
+    let server_domain = env::var("SERVER_DOMAIN").expect("SERVER_DOMAIN environment variable not set");
     match collection.update_one(filter, update, None).await {
-        Ok(result) if result.matched_count > 0 => HttpResponse::Ok().json(json!({"message": "Phone verified successfully"})),
+        // Ok(result) if result.matched_count > 0 => HttpResponse::Ok().json(json!({"message": "Phone verified successfully"})),
+        Ok(result) if result.matched_count > 0 => {
+            // Redirect to a specific page after successful verification
+            HttpResponse::Found()
+                .append_header((header::LOCATION, format!("https://{}/verification-success", server_domain)))
+                .finish()
+        },
         _ => HttpResponse::BadRequest().json(json!({"message": "Invalid verification token"})),
     }
 }

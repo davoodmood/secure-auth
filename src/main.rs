@@ -28,6 +28,8 @@ async fn main() -> std::io::Result<()> {
             .route("/login", web::post().to(handlers::auth::login_user))
             .route("/forgot_password", web::post().to(handlers::auth::forgot_password))
             .route("/reset_password", web::post().to(handlers::auth::reset_password))
+            .route("/verify_email", web::post().to(handlers::auth::verify_email))
+            .route("/verify_phone", web::post().to(handlers::auth::verify_phone))
             // Define more routes as needed
     })
     .bind("127.0.0.1:8080")?

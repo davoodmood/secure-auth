@@ -72,7 +72,14 @@ where
         let path = req.uri().path().to_owned();
 
         // List of public routes that don't require JWT verification
-        let public_routes = vec!["/register", "/login", "/forgot_password", "/reset_password"];
+        let public_routes = vec![
+            "/register", 
+            "/login", 
+            "/forgot_password", 
+            "/reset_password",
+            "/verify_email",
+            "/verify_phone",
+        ];
 
         // Check if the requested path is in the list of public routes
         let is_public_route = public_routes.iter().any(|route| path.starts_with(route));
