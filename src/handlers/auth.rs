@@ -501,10 +501,10 @@ pub struct VerifyRequest {
 }
 
 /* EMAIL */
-pub async fn verify_email(db: web::Data<Database>, form: web::Json<VerifyRequest>) -> HttpResponse {
+pub async fn verify_email(db: web::Data<Database>, token: web::Path<String>) -> HttpResponse {
     let collection = db.collection::<User>("users");
 
-    let filter = doc! { "email_verification_token": &form.token };
+    let filter = doc! { "email_verification_token": &token.into_inner() };
     let update = doc! { "$set": { "email_verified": true }, "$unset": { "email_verification_token": "" } };
     let server_domain = env::var("SERVER_DOMAIN").expect("SERVER_DOMAIN environment variable not set");
     match collection.update_one(filter, update, None).await {
@@ -520,7 +520,7 @@ pub async fn verify_email(db: web::Data<Database>, form: web::Json<VerifyRequest
 }
 
 
-/* EMAIL */
+/* PHONE */
 pub async fn verify_phone(db: web::Data<Database>, form: web::Json<VerifyRequest>) -> HttpResponse {
     let collection = db.collection::<User>("users");
 
