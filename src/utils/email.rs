@@ -1,5 +1,6 @@
 use log::{error, info};
 use std::env;
+use std::error::Error;
 use lettre::{Message, SmtpTransport, Transport};
 use lettre::transport::smtp::{
     authentication::{Credentials, Mechanism},
@@ -8,6 +9,22 @@ use lettre::transport::smtp::{
         TlsParameters
     }
 };
+
+struct SmtpConfig {
+    smtp_server: String,
+    smtp_username: String,
+    smtp_password: String,
+    server_domain: String,
+}
+
+fn get_smtp_config() -> Result<SmtpConfig, Box<dyn Error>> {
+    Ok(SmtpConfig {
+        smtp_server: env::var("SMTP_SERVER")?,
+        smtp_username: env::var("SMTP_USERNAME")?,
+        smtp_password: env::var("SMTP_PASSWORD")?,
+        server_domain: env::var("SERVER_DOMAIN")?,
+    })
+}
 
 pub async fn send_reset_email(email: &str, token: &str) -> Result<(), lettre::error::Error> {
     // Fetch SMTP server endpoint, username, and password from environment variables
@@ -53,3 +70,43 @@ pub async fn send_reset_email(email: &str, token: &str) -> Result<(), lettre::er
         }
     }
 }
+
+
+// Function to notify the user of the successful password reset
+pub async fn notify_password_reset(email: &str) -> Result<(), Box<dyn Error>> {
+    let config = get_smtp_config()?;
+
+    // Set the email body & message
+    let from_address = format!("no-reply@{}", config.server_domain);
+    let email_body = "Your password has been reset successfully.".to_string();
+    let email = Message::builder()
+        .from(from_address.parse()?)
+        .to(email.parse()?)
+        .subject("Password Reset Confirmation")
+        .body(email_body)?;
+
+    // Set the TLS-Required Parameters
+    let tls_parameters = TlsParameters::builder(config.smtp_server.clone())
+        .build()?;
+
+    // Setup the SMTP Transport with TLS
+    let mailer = SmtpTransport::relay(&config.smtp_server)?
+        .port(587)
+        .credentials(Credentials::new(config.smtp_username, config.smtp_password))
+        .tls(Tls::Required(tls_parameters))
+        .authentication(vec![Mechanism::Plain]) // Set the authentication method to PLAIN
+        .build();
+
+    // Send the email
+    match mailer.send(&email) {
+        Ok(_) => {
+            info!("Password reset confirmation email sent successfully");
+            Ok(())
+        }
+        Err(e) => {
+            error!("Failed to send password reset confirmation email: {:?}", e);
+            Err(Box::new(e))
+        }
+    }
+}
+

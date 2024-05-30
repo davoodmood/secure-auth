@@ -12,7 +12,17 @@ use otpauth::TOTP;
 use qrcode::{QrCode, render::svg};
 
 use crate::models::user::User;
-use crate::utils::{jwt::{Claims, create_token, create_reset_token}, email::send_reset_email};
+use crate::utils::{
+    jwt::{
+        Claims, 
+        create_token, 
+        create_reset_token
+    }, 
+    email::{
+        send_reset_email, 
+        notify_password_reset
+    }
+};
 
 struct Username(String);
 
@@ -375,6 +385,14 @@ async fn update_password(collection: &mongodb::Collection<User>, user_id: Object
     Ok(())
 }
 
+// Function to invalidate the password reset token
+async fn invalidate_reset_token(collection: &mongodb::Collection<User>, user_id: ObjectId) -> Result<(), Box<dyn std::error::Error>> {
+    let filter = doc! { "_id": user_id };
+    let update = doc! { "$set": { "password_reset_token": Bson::Null } };
+    collection.update_one(filter, update, None).await?;
+    Ok(())
+}
+
 pub async fn reset_password(db: web::Data<Database>, form: web::Json<ResetPasswordRequest>) -> HttpResponse {
     let collection = db.collection::<User>("users");
 
@@ -400,8 +418,17 @@ pub async fn reset_password(db: web::Data<Database>, form: web::Json<ResetPasswo
                 return HttpResponse::InternalServerError().finish();
             }
 
-            // @dev: TODO: Invalidate the token after usage. 
+            // @dev: TODO: Invalidate the token after usage.
+            // Invalidate the token after usage
+            if let Err(_) = invalidate_reset_token(&collection, user_id.clone()).await {
+                return HttpResponse::InternalServerError().finish();
+            }
+
             // @dev: TODO: Notify the user of the successful password reset
+            // Notify the user of the successful password reset
+            if let Err(_) = notify_password_reset(&user.email).await {
+                return HttpResponse::InternalServerError().finish();
+            }
         
             HttpResponse::Ok().json(json!({"message": "Password reset successfully"}))
         }
