@@ -110,3 +110,41 @@ pub async fn notify_password_reset(email: &str) -> Result<(), Box<dyn Error>> {
     }
 }
 
+pub async fn send_verification_email(email: &str, token: &str) -> Result<(), Box<dyn Error>> {
+    let config = get_smtp_config().expect("Failed to get SMTP config");
+
+    let from_address = format!("no-reply@{}", config.server_domain);
+    let email_body = format!("Please verify your email by clicking on the following link: https://{}/verify_email?token={}", config.server_domain, token);
+    let email = Message::builder()
+        .from(from_address.parse().unwrap())
+        .to(email.parse().unwrap())
+        .subject("Email Verification")
+        .body(email_body)
+        .unwrap();
+
+    let tls_parameters = TlsParameters::builder(config.smtp_server.clone())
+        .build()
+        .unwrap();
+
+    let mailer = SmtpTransport::relay(&config.smtp_server)
+        .unwrap()
+        .port(587)
+        .credentials(Credentials::new(config.smtp_username.clone(), config.smtp_password.clone()))
+        .tls(Tls::Required(tls_parameters))
+        .authentication(vec![Mechanism::Plain])
+        .build();
+
+    match mailer.send(&email) {
+        Ok(_) => {
+            info!("Verification email sent successfully");
+            Ok(())
+        }
+        Err(e) => {
+            error!("Failed to send verification email: {:?}", e);
+            Err(Box::new(e))
+        }
+    }
+}
+
+
+

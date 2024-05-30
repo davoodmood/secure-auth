@@ -13,6 +13,10 @@ use qrcode::{QrCode, render::svg};
 
 use crate::models::user::User;
 use crate::utils::{
+    verification::{
+        generate_email_verification_token,
+        generate_text_verification_token
+    },
     jwt::{
         Claims, 
         create_token, 
@@ -20,8 +24,10 @@ use crate::utils::{
     }, 
     email::{
         send_reset_email, 
-        notify_password_reset
-    }
+        notify_password_reset,
+        send_verification_email
+    },
+    txt::send_verification_text,
 };
 
 struct Username(String);
@@ -112,6 +118,7 @@ struct UserResponse {
     id: String,
     username: String,
     email: String,
+    message: String,
 }
 
 pub async fn register_user(
@@ -186,31 +193,69 @@ pub async fn register_user(
         Err(_) => return HttpResponse::InternalServerError().finish(),
     };
 
+    let email_verification_token = generate_email_verification_token();
+    let phone_verification_token = user_req.phone.as_ref().map(|_| generate_text_verification_token());
+
     // Create the user document to insert into MongoDB
-    let mut new_user_doc = doc! {
-        "username": username.0.clone(),
-        "email": email.0.clone(),
-        "password": hashed_password,
+    // let mut new_user_doc = doc! {
+    //     "username": username.0.clone(),
+    //     "email": email.0.clone(),
+    //     "password": hashed_password,
+    // };
+    let mut new_user = User {
+        id: None,
+        username: username.0.clone(),
+        email: email.0.clone(),
+        password: hashed_password,
+        onboarding: false,
+        phone: None, // Initialize as None
+        email_verified: None,
+        phone_verified: None,
+        email_verification_token: Some(email_verification_token.clone()),
+        phone_verification_token: phone_verification_token.clone(),
+        tel: None,
+        password_reset_token: None,
+        mfa_enabled: Some(false),
+        mfa_secret: None,
     };
 
-    if let Some(phone) = phone {
-        new_user_doc.insert("phone", phone.0);
+    if let Some(phone) = &phone {
+        new_user.phone = Some(phone.0.clone());
     }
+
 
     // Insert the new user into the database
     match db
         .collection("users")
-        .insert_one(new_user_doc.clone(), None)
+        .insert_one(new_user, None)
         .await
     {
         Ok(insert_result) => {
             let id = insert_result.inserted_id.as_object_id().unwrap().to_hex();
 
+            // Send verification email
+            match send_verification_email(&email.0, &email_verification_token).await {
+                Ok(_) => (),
+                Err(err) => return HttpResponse::InternalServerError().body(format!("Failed to send verification email: {}", err)),
+            }
+
+            // Send verification text if phone is provided
+            if let Some(phone) = &phone {
+                if let Some(phone_verification_token) = &phone_verification_token {
+                    match send_verification_text(&phone.0, &phone_verification_token).await {
+                        Ok(_) => (),
+                        Err(err) => return HttpResponse::InternalServerError().body(format!("Failed to send verification text: {}", err)),
+                    }
+                } else {
+                    return HttpResponse::InternalServerError().body("Phone verification token should exist");
+                }
+            }    
             // Create a response struct, excluding the password
             let user_response = UserResponse {
                 id,
                 username: username.0,
                 email: email.0,
+                message: "Registration successful. Please verify your email or phone to access the services".to_string(),
             };
 
             HttpResponse::Ok().json(user_response)
@@ -284,6 +329,10 @@ pub async fn login_user(db: web::Data<Database>, form: web::Json<UserLogin>) -> 
             return HttpResponse::InternalServerError().finish();
         }
     };
+
+    if user.email_verified != Some(true) || user.phone_verified != Some(true) {
+        return HttpResponse::Unauthorized().json(json!({"message": "Please verify your email or phone to access the services"}));
+    }
 
     if let Ok(valid) = verify(&form.password, &user.password) {
         if valid {
@@ -438,6 +487,46 @@ pub async fn reset_password(db: web::Data<Database>, form: web::Json<ResetPasswo
         }
     }
 }
+
+
+/*
+  USER VERIFICATION HANDLER
+*/
+
+#[derive(Deserialize)]
+pub struct VerifyRequest {
+    token: String,
+}
+
+/* EMAIL */
+pub async fn verify_email(db: web::Data<Database>, form: web::Json<VerifyRequest>) -> HttpResponse {
+    let collection = db.collection::<User>("users");
+
+    let filter = doc! { "email_verification_token": &form.token };
+    let update = doc! { "$set": { "email_verified": true }, "$unset": { "email_verification_token": "" } };
+
+    match collection.update_one(filter, update, None).await {
+        Ok(result) if result.matched_count > 0 => HttpResponse::Ok().json(json!({"message": "Email verified successfully"})),
+        _ => HttpResponse::BadRequest().json(json!({"message": "Invalid verification token"})),
+    }
+}
+
+
+/* EMAIL */
+pub async fn verify_phone(db: web::Data<Database>, form: web::Json<VerifyRequest>) -> HttpResponse {
+    let collection = db.collection::<User>("users");
+
+    let filter = doc! { "phone_verification_token": &form.token };
+    let update = doc! { "$set": { "phone_verified": true }, "$unset": { "phone_verification_token": "" } };
+
+    match collection.update_one(filter, update, None).await {
+        Ok(result) if result.matched_count > 0 => HttpResponse::Ok().json(json!({"message": "Phone verified successfully"})),
+        _ => HttpResponse::BadRequest().json(json!({"message": "Invalid verification token"})),
+    }
+}
+
+
+
 
 
 /*

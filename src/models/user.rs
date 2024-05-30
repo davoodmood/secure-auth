@@ -9,13 +9,17 @@ pub struct User {
     pub username: String,
     pub password: String, // This will store the hashed password
     pub email: String,
+    pub onboarding: bool,
     pub phone: Option<String>,
     pub tel: Option<String>,
+    pub email_verified: Option<bool>,
+    pub phone_verified: Option<bool>,
+    pub email_verification_token: Option<String>,
+    pub phone_verification_token: Option<String>,
     pub password_reset_token: Option<String>,
-    pub user_verified: Option<bool>,
     pub mfa_enabled: Option<bool>,
     pub mfa_secret: Option<String>,  // This will store the TOTP secret, empty if MFA is not enabled
-    // pub optedOutMarketingEmails: Option<String>,
+    // pub opted_out_marketing_emails: Option<String>,
     // pub failed_login_attempts: Option<i32>,
     // pub lockout_until: Option<DateTime<Utc>>,
     // Add other fields as necessary

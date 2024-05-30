@@ -1,10 +1,13 @@
+use rand::{distributions::Alphanumeric, thread_rng, Rng};
+
 pub fn generate_recovery_codes() -> Vec<String> {
     (0..5) // Generate 5 recovery codes
         .map(|_| {
             thread_rng()
                 .sample_iter(&Alphanumeric)
                 .take(10) // Each code has 10 characters
-                .collect()
+                .map(|c| c as char) // Convert u8 to char
+                .collect::<String>()
         })
         .collect()
 }
