@@ -12,4 +12,8 @@ pub fn generate_recovery_codes() -> Vec<String> {
         .collect()
 }
 
-// @dev: Store these codes securely, and mark them as used once a user redeems one.
+// @dev: TODO Store these codes securely using the crypto utils, and mark them as used once a user redeems one.
+pub fn generate_totp_secret() -> String {
+    let secret: String = thread_rng().sample_iter(&Alphanumeric).take(32).map(char::from).collect();
+    secret
+}

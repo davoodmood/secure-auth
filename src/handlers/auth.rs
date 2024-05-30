@@ -1,4 +1,4 @@
-use std::env;
+use std::{collections::HashMap, env};
 
 use actix_web::{http::header, web, HttpResponse, Responder};
 use mongodb::{
@@ -12,8 +12,10 @@ use serde_json::json;
 use thiserror::Error;
 use otpauth::TOTP;
 use qrcode::{QrCode, render::svg};
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::models::user::User;
+
+use crate::{models::user::User, utils::mfa::generate_totp_secret};
 use crate::utils::{
     verification::{
         generate_email_verification_token,
@@ -501,10 +503,15 @@ pub struct VerifyRequest {
 }
 
 /* EMAIL */
-pub async fn verify_email(db: web::Data<Database>, token: web::Path<String>) -> HttpResponse {
+pub async fn verify_email(db: web::Data<Database>, token: web::Query<HashMap<String, String>>) -> HttpResponse {
+    let token_value = match token.get("token") {
+        Some(value) => value,
+        None => return HttpResponse::BadRequest().json(json!({"message": "Token parameter is missing"})),
+    };
+    
     let collection = db.collection::<User>("users");
 
-    let filter = doc! { "email_verification_token": &token.into_inner() };
+    let filter = doc! { "email_verification_token": token_value  };
     let update = doc! { "$set": { "email_verified": true }, "$unset": { "email_verification_token": "" } };
     let server_domain = env::var("SERVER_DOMAIN").expect("SERVER_DOMAIN environment variable not set");
     match collection.update_one(filter, update, None).await {
@@ -540,42 +547,84 @@ pub async fn verify_phone(db: web::Data<Database>, form: web::Json<VerifyRequest
 }
 
 
+/*
+  MFA SETUP HANDLER
+*/
+//@dev alternative libs: https://github.com/constantoine/totp-rs
+
+pub async fn setup_mfa(db: web::Data<Database>, user_id: web::Path<String>) -> HttpResponse {
+    // Fetch the user from the database
+    let collection = db.collection::<User>("users");
+    let filter = doc! { "id": user_id.clone() };
+    
+    let user = match collection.find_one(filter.clone(), None).await {
+        Ok(Some(user)) => user,
+        Ok(None) => return HttpResponse::NotFound().json(json!({"message": "User not found"})),
+        Err(_) => return HttpResponse::InternalServerError().finish(),
+    };
 
 
+    // Generate a new TOTP secret 
+    // @dev: TODO - do it from recovery codes
+    // @dev: check if we can securely send a pdf for download from user request!? 
+    let secret = generate_totp_secret();
 
+    let totp = TOTP::new(secret.clone());
+    // Use the user's email and ID as the label for the TOTP URI
+    let label = format!("{}:{}", user.email, user_id);
+    let uri = totp.to_uri(label, "MyApp".to_string());
+
+    // Generate a QR code for the secret
+    let code = QrCode::new(uri).unwrap();
+    let image = code.render::<svg::Color>().build();
+
+    // Save the secret in the user's profile
+    let update = doc! { "$set": { "mfa_secret": secret } };
+    if let Err(_) = collection.update_one(filter, update, None).await {
+        return HttpResponse::InternalServerError().finish();
+    }
+
+    // Respond with the QR code image
+    HttpResponse::Ok().content_type("image/svg+xml").body(image)
+}
 /*
   MFA SETUP HANDLER
 */
 
-// pub async fn setup_mfa(db: web::Data<Database>, user_id: web::Path<String>) -> HttpResponse {
-//     // Generate a new TOTP secret
-//     let totp = TOTP::new("base32secret3232");
-//     let secret = totp.secret();
+#[derive(Deserialize)]
+pub struct MfaVerificationRequest {
+    totp_code: String,
+}
 
-//     // Generate a QR code for the secret
-//     let uri = totp.uri("user@example.com", "MyApp");
-//     let code = QrCode::new(uri).unwrap();
-//     let image = code.render::<svg::Color>().build();
+pub async fn verify_mfa(db: web::Data<Database>, user_id: web::Path<String>, form: web::Json<MfaVerificationRequest>) -> HttpResponse {
+    // Retrieve the user's MFA secret from the database
+    let collection = db.collection::<User>("users");
+    let filter = doc! { "id": user_id.clone() };
 
-//     // Save the secret in the user's profile (after confirmation)
-//     // Respond with the QR code image
-//     HttpResponse::Ok().content_type("image/svg+xml").body(image)
-// }
+    let user = match collection.find_one(filter, None).await {
+        Ok(Some(user)) => user,
+        Ok(None) => return HttpResponse::NotFound().json(json!({"message": "User not found"})),
+        Err(_) => return HttpResponse::InternalServerError().finish(),
+    };
 
-/*
-  MFA SETUP HANDLER
-*/
+    // Check if MFA secret is available
+    let secret = match user.mfa_secret {
+        Some(secret) => secret,
+        None => return HttpResponse::BadRequest().json(json!({"message": "MFA not set up for this user"})),
+    };
 
-// pub async fn verify_mfa(db: web::Data<Database>, user_id: web::Path<String>, form: web::Json<MfaVerificationRequest>) -> HttpResponse {
-//     // Retrieve the user's MFA secret from the database
-//     // Use the otpauth crate to verify the TOTP
-//     let totp = TOTP::from_base32(&user.mfa_secret.unwrap()).unwrap();
-//     let verified = totp.verify(form.totp_code, 30, 0);
+    // Use the otpauth crate to verify the TOTP
+    let totp = TOTP::from_base32(&secret).unwrap();
+    let code = form.totp_code.parse::<u32>().unwrap_or(0);
+    let period = 30;
+    let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
 
-//     if verified {
-//         // Proceed with login
-//         HttpResponse::Ok().json({"message": "MFA verification successful"})
-//     } else {
-//         HttpResponse::Unauthorized().json({"message": "MFA verification failed"})
-//     }
-// }
+    let verified = totp.verify(code, period, timestamp);
+
+    if verified {
+        //@dev TODO: Proceed & integrate into login
+        HttpResponse::Ok().json(json!({"message": "MFA verification successful"}))
+    } else {
+        HttpResponse::Unauthorized().json(json!({"message": "MFA verification failed"}))
+    }
+}
