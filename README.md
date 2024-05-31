@@ -91,20 +91,20 @@ To run Secure Auth, you need to have Rust and MongoDB installed on your machine.
 }
 ```
 2. **User Login**
-Endpoint: `/login`
-Method: POST
-Request Body:
+- Endpoint: `/login`
+- Method: POST
+- Request Body:
 ```json
 {
-    "identifier": "johndoe", // or email
+    "identifier": "johndoe", // username or email
     "password": "yourpassword"
 }
 ```
 
 2. **Verify Email**
-Endpoint: `/verify_email`
-Method: `GET`
-URL:
+- Endpoint: `/verify_email`
+- Method: `GET`
+- URL:
 ```js
 //@notice: Verification token will be automatically send to user's email
 // then user will be verified and redirected to your frontend's "/verification-success" 
