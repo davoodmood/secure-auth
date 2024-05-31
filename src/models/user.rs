@@ -19,6 +19,7 @@ pub struct User {
     pub password_reset_token: Option<String>,
     pub mfa_enabled: Option<bool>,
     pub mfa_secret: Option<String>,  // This will store the TOTP secret, empty if MFA is not enabled
+    pub mfa_recovery_codes: Option<Vec<String>>,
     // pub opted_out_marketing_emails: Option<String>,
     // pub failed_login_attempts: Option<i32>,
     // pub lockout_until: Option<DateTime<Utc>>,

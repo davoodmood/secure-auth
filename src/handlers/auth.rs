@@ -7,6 +7,7 @@ use mongodb::{
 use regex::Regex;
 use bcrypt::{hash, DEFAULT_COST, verify};
 use jsonwebtoken::{encode, Header, EncodingKey};
+use base64::{engine::general_purpose, Engine};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use thiserror::Error;
@@ -15,7 +16,7 @@ use qrcode::{QrCode, render::svg};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 
-use crate::{models::user::User, utils::mfa::generate_totp_secret};
+use crate::{models::user::User, utils::{crypto::{decrypt, encrypt}, mfa::{generate_recovery_codes, generate_totp_secret}}};
 use crate::utils::{
     verification::{
         generate_email_verification_token,
@@ -221,6 +222,7 @@ pub async fn register_user(
         password_reset_token: None,
         mfa_enabled: Some(false),
         mfa_secret: None,
+        mfa_recovery_codes: None,
     };
 
     if let Some(phone) = &phone {
@@ -340,11 +342,14 @@ pub async fn login_user(db: web::Data<Database>, form: web::Json<UserLogin>) -> 
 
     if let Ok(valid) = verify(&form.password, &user.password) {
         if valid {
-            match create_token(&user.username) {
-                Ok(token) => return HttpResponse::Ok().json(TokenResponse { token }),
-                Err(_) => return HttpResponse::InternalServerError().finish(),
+            if user.mfa_enabled.unwrap_or(false) {
+                return HttpResponse::Ok().json(json!({"message": "MFA required", "mfa_required": true}));
+            } else {
+                match create_token(&user.username) {
+                    Ok(token) => return HttpResponse::Ok().json(TokenResponse { token }),
+                    Err(_) => return HttpResponse::InternalServerError().finish(),
+                }
             }
-            
         }
     }
 
@@ -565,8 +570,6 @@ pub async fn setup_mfa(db: web::Data<Database>, user_id: web::Path<String>) -> H
 
 
     // Generate a new TOTP secret 
-    // @dev: TODO - do it from recovery codes
-    // @dev: check if we can securely send a pdf for download from user request!? 
     let secret = generate_totp_secret();
 
     let totp = TOTP::new(secret.clone());
@@ -575,17 +578,66 @@ pub async fn setup_mfa(db: web::Data<Database>, user_id: web::Path<String>) -> H
     let uri = totp.to_uri(label, "MyApp".to_string());
 
     // Generate a QR code for the secret
-    let code = QrCode::new(uri).unwrap();
+    let code = match QrCode::new(&uri) {
+        Ok(code) => code,
+        Err(_) => return HttpResponse::InternalServerError().finish(),
+    };
     let image = code.render::<svg::Color>().build();
+    let base64_image = general_purpose::STANDARD.encode(&image);
+    
+    // Generate recovery codes
+    // @dev: check if we can securely send a pdf for download from user request!? 
+    let recovery_codes = generate_recovery_codes();
 
-    // Save the secret in the user's profile
-    let update = doc! { "$set": { "mfa_secret": secret } };
+    // Retrieve the key and iv from environment variables
+    let encryption_key = match env::var("ENCRYPTION_KEY") {
+        Ok(val) => match general_purpose::STANDARD.decode(&val) {
+            Ok(decoded) => decoded,
+            Err(_) => return HttpResponse::InternalServerError().json(json!({"message": "Invalid ENCRYPTION_KEY"})),
+        },
+        Err(_) => return HttpResponse::InternalServerError().json(json!({"message": "ENCRYPTION_KEY not set"})),
+    };
+
+    let encryption_iv = match env::var("ENCRYPTION_IV") {
+        Ok(val) => match general_purpose::STANDARD.decode(&val) {
+            Ok(decoded) => decoded,
+            Err(_) => return HttpResponse::InternalServerError().json(json!({"message": "Invalid ENCRYPTION_IV"})),
+        },
+        Err(_) => return HttpResponse::InternalServerError().json(json!({"message": "ENCRYPTION_IV not set"})),
+    };
+
+    let encrypted_secret = encrypt(secret.as_bytes(), &encryption_key, &encryption_iv);
+    let encrypted_recovery_codes: Vec<String> = recovery_codes.clone()
+        .into_iter()
+        .map(|code| general_purpose::STANDARD.encode(&encrypt(code.as_bytes(), &encryption_key, &encryption_iv)))
+        .collect();
+
+    // Save the encrypted secret and recovery codes in the user's profile
+    let update = doc! { 
+        "$set": { 
+            "mfa_secret": general_purpose::STANDARD.encode(&encrypted_secret),
+            "recovery_codes": encrypted_recovery_codes
+        } 
+    };
+    
     if let Err(_) = collection.update_one(filter, update, None).await {
         return HttpResponse::InternalServerError().finish();
     }
 
-    // Respond with the QR code image
-    HttpResponse::Ok().content_type("image/svg+xml").body(image)
+    // Respond with the QR code image and recovery codes
+    let response = json!({
+        "type": "totp",
+        "object": "authentication_factor",
+        "id": format!("auth_factor_{}", user_id),
+        "totp": {
+            "qr_code": format!("data:image/svg+xml;base64,{}", base64_image),
+            "secret": secret,
+            "uri": uri
+        },
+        "recovery_codes": recovery_codes,
+    });
+
+    HttpResponse::Ok().json(response)
 }
 /*
   MFA SETUP HANDLER
@@ -608,22 +660,61 @@ pub async fn verify_mfa(db: web::Data<Database>, user_id: web::Path<String>, for
     };
 
     // Check if MFA secret is available
-    let secret = match user.mfa_secret {
+    let encrypted_secret = match user.mfa_secret {
         Some(secret) => secret,
         None => return HttpResponse::BadRequest().json(json!({"message": "MFA not set up for this user"})),
     };
 
+    // Retrieve the key and iv from environment variables
+    let encryption_key = match env::var("ENCRYPTION_KEY") {
+        Ok(val) => match general_purpose::STANDARD.decode(&val) {
+            Ok(decoded) => decoded,
+            Err(_) => return HttpResponse::InternalServerError().json(json!({"message": "Invalid ENCRYPTION_KEY"})),
+        },
+        Err(_) => return HttpResponse::InternalServerError().json(json!({"message": "ENCRYPTION_KEY not set"})),
+    };
+
+    let encryption_iv = match env::var("ENCRYPTION_IV") {
+        Ok(val) => match general_purpose::STANDARD.decode(&val) {
+            Ok(decoded) => decoded,
+            Err(_) => return HttpResponse::InternalServerError().json(json!({"message": "Invalid ENCRYPTION_IV"})),
+        },
+        Err(_) => return HttpResponse::InternalServerError().json(json!({"message": "ENCRYPTION_IV not set"})),
+    };
+
+    // Decrypt the secret
+    let encrypted_secret_bytes = match general_purpose::STANDARD.decode(&encrypted_secret) {
+        Ok(bytes) => bytes,
+        Err(_) => return HttpResponse::InternalServerError().json(json!({"message": "Failed to decode encrypted secret"})),
+    };
+    let decrypted_secret_bytes = decrypt(&encrypted_secret_bytes, &encryption_key, &encryption_iv);
+    let decrypted_secret = match String::from_utf8(decrypted_secret_bytes) {
+        Ok(secret) => secret,
+        Err(_) => return HttpResponse::InternalServerError().json(json!({"message": "Invalid UTF-8 sequence in decrypted secret"})),
+    };
+
+
     // Use the otpauth crate to verify the TOTP
-    let totp = TOTP::from_base32(&secret).unwrap();
-    let code = form.totp_code.parse::<u32>().unwrap_or(0);
+    let totp = TOTP::new(decrypted_secret);
+
+    let code = match form.totp_code.parse::<u32>() {
+        Ok(code) => code,
+        Err(_) => return HttpResponse::BadRequest().json(json!({"message": "Invalid TOTP code"})),
+    };
     let period = 30;
-    let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs();
+    let timestamp = match SystemTime::now().duration_since(UNIX_EPOCH) {
+        Ok(duration) => duration.as_secs(),
+        Err(_) => return HttpResponse::InternalServerError().json(json!({"message": "System time error"})),
+    };
+
 
     let verified = totp.verify(code, period, timestamp);
 
     if verified {
-        //@dev TODO: Proceed & integrate into login
-        HttpResponse::Ok().json(json!({"message": "MFA verification successful"}))
+        match create_token(&user.username) {
+            Ok(token) => return HttpResponse::Ok().json(TokenResponse { token }),
+            Err(_) => return HttpResponse::InternalServerError().finish(),
+        }
     } else {
         HttpResponse::Unauthorized().json(json!({"message": "MFA verification failed"}))
     }
