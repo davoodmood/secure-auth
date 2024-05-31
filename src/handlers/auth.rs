@@ -371,6 +371,8 @@ pub async fn login_user(db: web::Data<Database>, form: web::Json<UserLogin>) -> 
     if let Ok(valid) = verify(&form.password, &user.password) {
         if valid {
             if user.mfa_enabled.unwrap_or(false) {
+                // @dev: add some signal field to db that the user has authenticated password 
+                //       and awaits mfa authentication, so a user cannot call the mfa_verified directly. 
                 return HttpResponse::Ok().json(json!({"message": "MFA required", "mfa_required": true}));
             } else {
                 match create_token(&user.username) {
