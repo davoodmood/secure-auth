@@ -1,6 +1,7 @@
 use std::{collections::HashMap, env};
 
 use actix_web::{http::header, web, HttpResponse, Responder};
+use chrono::Utc;
 use mongodb::{
     bson::{doc, oid::ObjectId, Bson}, Database
 };
@@ -16,7 +17,7 @@ use qrcode::{QrCode, render::svg};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 
-use crate::{models::user::User, utils::{crypto::{decrypt, encrypt}, mfa::{generate_recovery_codes, generate_totp_secret}}};
+use crate::{models::{communication::CommunicationPreferences, user::User}, utils::{crypto::{decrypt, encrypt}, mfa::{generate_recovery_codes, generate_totp_secret}}};
 use crate::utils::{
     verification::{
         generate_email_verification_token,
@@ -116,6 +117,7 @@ pub struct UserRequest {
     email: String,
     password: String,
     phone: Option<String>,
+    receive_promotions: Option<bool>,
 }
 
 #[derive(Serialize)]
@@ -201,12 +203,8 @@ pub async fn register_user(
     let email_verification_token = generate_email_verification_token();
     let phone_verification_token = user_req.phone.as_ref().map(|_| generate_text_verification_token());
 
-    // Create the user document to insert into MongoDB
-    // let mut new_user_doc = doc! {
-    //     "username": username.0.clone(),
-    //     "email": email.0.clone(),
-    //     "password": hashed_password,
-    // };
+    let now = Utc::now().timestamp();
+
     let mut new_user = User {
         id: None,
         username: username.0.clone(),
@@ -223,6 +221,13 @@ pub async fn register_user(
         mfa_enabled: Some(false),
         mfa_secret: None,
         mfa_recovery_codes: None,
+        communication_preferences: CommunicationPreferences {
+            receive_promotions_email: Some(user_req.receive_promotions.unwrap_or(false)),
+            receive_promotions_sms: Some(user_req.receive_promotions.unwrap_or(false)),
+        },
+        created: now,
+        updated: now,
+        last_logged_in: None,    
     };
 
     if let Some(phone) = &phone {
@@ -314,6 +319,7 @@ impl From<jsonwebtoken::errors::Error> for LoginError {
         LoginError::InternalServerError
     }
 }
+
 pub async fn login_user(db: web::Data<Database>, form: web::Json<UserLogin>) -> HttpResponse {
     let collection = db.collection::<User>("users");
 
@@ -346,7 +352,17 @@ pub async fn login_user(db: web::Data<Database>, form: web::Json<UserLogin>) -> 
                 return HttpResponse::Ok().json(json!({"message": "MFA required", "mfa_required": true}));
             } else {
                 match create_token(&user.username) {
-                    Ok(token) => return HttpResponse::Ok().json(TokenResponse { token }),
+                    Ok(token) => {
+                        let timestamp = Utc::now().timestamp(); // Update last_logged_in field
+                        // Update the user in the database
+                        let filter = doc! { "_id": user.id.clone() };
+                        let update = doc! { "$set": { "last_logged_in": timestamp } };
+        
+                        if let Err(_) = collection.update_one(filter, update, None).await {
+                            return HttpResponse::InternalServerError().finish();
+                        }
+                        return HttpResponse::Ok().json(TokenResponse { token });
+                    },
                     Err(_) => return HttpResponse::InternalServerError().finish(),
                 }
             }
@@ -712,7 +728,17 @@ pub async fn verify_mfa(db: web::Data<Database>, user_id: web::Path<String>, for
 
     if verified {
         match create_token(&user.username) {
-            Ok(token) => return HttpResponse::Ok().json(TokenResponse { token }),
+            Ok(token) => {
+                let timestamp = Utc::now().timestamp(); // Update last_logged_in field
+                // Update the user in the database
+                let filter = doc! { "_id": user.id.clone() };
+                let update = doc! { "$set": { "last_logged_in": timestamp } };
+
+                if let Err(_) = collection.update_one(filter, update, None).await {
+                    return HttpResponse::InternalServerError().finish();
+                }
+                return HttpResponse::Ok().json(TokenResponse { token });
+            },
             Err(_) => return HttpResponse::InternalServerError().finish(),
         }
     } else {
