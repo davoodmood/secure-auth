@@ -2,13 +2,13 @@ use aes::Aes256;
 use cbc::{Decryptor, Encryptor};
 use cipher::{generic_array::GenericArray, BlockDecryptMut, BlockEncryptMut, BlockSizeUser, KeyIvInit};
 use rand::{distributions::Alphanumeric, thread_rng, Rng};
-use base64::encode;
+use base64::encode; // @dev depricated . switch to Engine::encode
 
 // Define type alias for AES-256 CBC mode
 type Aes256CbcEnc = cbc::Encryptor<Aes256>;
 type Aes256CbcDec = cbc::Decryptor<Aes256>;
 
-pub fn generate_key_iv() -> (Vec<u8>, Vec<u8>) {
+pub fn _generate_key_iv() -> (Vec<u8>, Vec<u8>) {
     let key: Vec<u8> = thread_rng()
         .sample_iter(&Alphanumeric)
         .take(32) // key size for AES 256
@@ -24,7 +24,7 @@ pub fn generate_key_iv() -> (Vec<u8>, Vec<u8>) {
     (key, iv)
 }
 
-pub fn generate_base64_key_iv() {
+pub fn _generate_base64_key_iv() {
     let key: Vec<u8> = thread_rng()
         .sample_iter(&Alphanumeric)
         .take(32) // key size for AES 256

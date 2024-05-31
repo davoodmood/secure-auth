@@ -125,7 +125,34 @@ struct UserResponse {
     id: String,
     username: String,
     email: String,
-    message: String,
+    onboarding: bool,
+    phone: Option<String>,
+    tel: Option<String>,
+    email_verified: Option<bool>,
+    phone_verified: Option<bool>,
+    communication_preferences: CommunicationPreferences,
+    created: i64,
+    last_logged_in: Option<i64>,
+    // message: String,
+}
+
+impl From<User> for UserResponse {
+    fn from(user: User) -> Self {
+        UserResponse {
+            id: user.id.map(|id| id.to_hex()).unwrap_or("".to_string()), // Convert ObjectId to String
+            username: user.username,
+            email: user.email,
+            onboarding: user.onboarding,
+            phone: user.phone,
+            tel: user.tel,
+            email_verified: user.email_verified,
+            phone_verified: user.phone_verified,
+            communication_preferences: user.communication_preferences,
+            created: user.created,
+            last_logged_in: user.last_logged_in,
+            // message: "User data fetched successfully".to_string(),
+        }
+    }
 }
 
 pub async fn register_user(
@@ -238,11 +265,11 @@ pub async fn register_user(
     // Insert the new user into the database
     match db
         .collection("users")
-        .insert_one(new_user, None)
+        .insert_one(new_user.clone(), None)
         .await
     {
-        Ok(insert_result) => {
-            let id = insert_result.inserted_id.as_object_id().unwrap().to_hex();
+        Ok(_insert_result) => {
+            // let id = _insert_result.inserted_id.as_object_id().unwrap().to_hex();
 
             // Send verification email
             match send_verification_email(&email.0, &email_verification_token).await {
@@ -262,13 +289,7 @@ pub async fn register_user(
                 }
             }    
             // Create a response struct, excluding the password
-            let user_response = UserResponse {
-                id,
-                username: username.0,
-                email: email.0,
-                message: "Registration successful. Please verify your email or phone to access the services".to_string(),
-            };
-
+            let user_response: UserResponse = new_user.into();
             HttpResponse::Ok().json(user_response)
         }
         Err(_) => HttpResponse::InternalServerError().finish(),
@@ -292,6 +313,7 @@ pub struct UserLogin {
 #[derive(Serialize)]
 struct TokenResponse {
     token: String,
+    user: UserResponse,
 }
 
 #[derive(Debug, Error)]
@@ -342,7 +364,7 @@ pub async fn login_user(db: web::Data<Database>, form: web::Json<UserLogin>) -> 
         }
     };
 
-    if user.email_verified != Some(true) || user.phone_verified != Some(true) {
+    if user.email_verified != Some(true) && user.phone_verified != Some(true) {
         return HttpResponse::Unauthorized().json(json!({"message": "Please verify your email or phone to access the services"}));
     }
 
@@ -361,7 +383,8 @@ pub async fn login_user(db: web::Data<Database>, form: web::Json<UserLogin>) -> 
                         if let Err(_) = collection.update_one(filter, update, None).await {
                             return HttpResponse::InternalServerError().finish();
                         }
-                        return HttpResponse::Ok().json(TokenResponse { token });
+                        let user_response: UserResponse = user.into();
+                        return HttpResponse::Ok().json(TokenResponse { token, user: user_response });
                     },
                     Err(_) => return HttpResponse::InternalServerError().finish(),
                 }
@@ -574,9 +597,15 @@ pub async fn verify_phone(db: web::Data<Database>, form: web::Json<VerifyRequest
 //@dev alternative libs: https://github.com/constantoine/totp-rs
 
 pub async fn setup_mfa(db: web::Data<Database>, user_id: web::Path<String>) -> HttpResponse {
+
+    println!("user_id is: {}", user_id);
     // Fetch the user from the database
     let collection = db.collection::<User>("users");
-    let filter = doc! { "id": user_id.clone() };
+    let object_id = match ObjectId::parse_str(user_id.as_ref()) {
+        Ok(id) => id,
+        Err(_) => return HttpResponse::BadRequest().json(json!({"message": "Invalid user ID"})),
+    };    
+    let filter = doc! { "_id": object_id };
     
     let user = match collection.find_one(filter.clone(), None).await {
         Ok(Some(user)) => user,
@@ -584,14 +613,17 @@ pub async fn setup_mfa(db: web::Data<Database>, user_id: web::Path<String>) -> H
         Err(_) => return HttpResponse::InternalServerError().finish(),
     };
 
+    // Check if MFA is already enabled for the user
+    if let Some(true) = user.mfa_enabled {
+        return HttpResponse::BadRequest().json(json!({"message": "MFA is already enabled for this user"}));
+    }
 
     // Generate a new TOTP secret 
     let secret = generate_totp_secret();
 
     let totp = TOTP::new(secret.clone());
     // Use the user's email and ID as the label for the TOTP URI
-    let label = format!("{}:{}", user.email, user_id);
-    let uri = totp.to_uri(label, "MyApp".to_string());
+    let uri = totp.to_uri(user.email, "MyApp".to_string());
 
     // Generate a QR code for the secret
     let code = match QrCode::new(&uri) {
@@ -631,8 +663,9 @@ pub async fn setup_mfa(db: web::Data<Database>, user_id: web::Path<String>) -> H
     // Save the encrypted secret and recovery codes in the user's profile
     let update = doc! { 
         "$set": { 
+            "mfa_enabled": true,
             "mfa_secret": general_purpose::STANDARD.encode(&encrypted_secret),
-            "recovery_codes": encrypted_recovery_codes
+            "mfa_recovery_codes": encrypted_recovery_codes
         } 
     };
     
@@ -667,16 +700,20 @@ pub struct MfaVerificationRequest {
 pub async fn verify_mfa(db: web::Data<Database>, user_id: web::Path<String>, form: web::Json<MfaVerificationRequest>) -> HttpResponse {
     // Retrieve the user's MFA secret from the database
     let collection = db.collection::<User>("users");
-    let filter = doc! { "id": user_id.clone() };
+    let object_id = match ObjectId::parse_str(user_id.as_ref()) {
+        Ok(id) => id,
+        Err(_) => return HttpResponse::BadRequest().json(json!({"message": "Invalid user ID"})),
+    };    
+    let filter = doc! { "_id": object_id };
 
-    let user = match collection.find_one(filter, None).await {
+    let user = match collection.find_one(filter.clone(), None).await {
         Ok(Some(user)) => user,
         Ok(None) => return HttpResponse::NotFound().json(json!({"message": "User not found"})),
         Err(_) => return HttpResponse::InternalServerError().finish(),
     };
 
     // Check if MFA secret is available
-    let encrypted_secret = match user.mfa_secret {
+    let encrypted_secret = match user.clone().mfa_secret {
         Some(secret) => secret,
         None => return HttpResponse::BadRequest().json(json!({"message": "MFA not set up for this user"})),
     };
@@ -731,13 +768,14 @@ pub async fn verify_mfa(db: web::Data<Database>, user_id: web::Path<String>, for
             Ok(token) => {
                 let timestamp = Utc::now().timestamp(); // Update last_logged_in field
                 // Update the user in the database
-                let filter = doc! { "_id": user.id.clone() };
+                // let filter = doc! { "_id": user.id.clone() };
                 let update = doc! { "$set": { "last_logged_in": timestamp } };
 
                 if let Err(_) = collection.update_one(filter, update, None).await {
                     return HttpResponse::InternalServerError().finish();
                 }
-                return HttpResponse::Ok().json(TokenResponse { token });
+                let user_response: UserResponse = user.into();
+                return HttpResponse::Ok().json(TokenResponse { token, user: user_response });
             },
             Err(_) => return HttpResponse::InternalServerError().finish(),
         }

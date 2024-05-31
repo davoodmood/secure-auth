@@ -1,7 +1,7 @@
 use serde::{Serialize, Deserialize};
 // use mongodb::bson::oid::ObjectId;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CommunicationPreferences {
     // #[serde(rename = "_id", skip_serializing_if = "Option::is_none")]
     // pub id: Option<ObjectId>, // in case we wanna store as a collection in db
