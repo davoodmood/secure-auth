@@ -32,6 +32,8 @@ async fn main() -> std::io::Result<()> {
             .route("/verify_phone", web::post().to(handlers::auth::verify_phone))
             .route("/setup_mfa/{user_id}", web::post().to(handlers::auth::setup_mfa))
             .route("/verify_mfa/{user_id}", web::post().to(handlers::auth::verify_mfa))
+            .route("/recover_mfa/{user_id}", web::post().to(handlers::auth::recover_mfa))
+            .route("/disable_mfa/{user_id}", web::post().to(handlers::auth::disable_mfa))
             // Define more routes as needed
     })
     .bind("127.0.0.1:8080")?

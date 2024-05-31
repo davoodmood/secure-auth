@@ -79,7 +79,8 @@ where
             "/reset_password",
             "/verify_email",
             "/verify_phone",
-            "/verify_mfa"
+            "/verify_mfa",
+            "/recover_mfa",
         ];
 
         // Check if the requested path is in the list of public routes
