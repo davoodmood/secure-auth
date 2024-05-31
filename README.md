@@ -127,6 +127,29 @@ To run Secure Auth, you need to have Rust and MongoDB installed on your machine.
 }
 ```
 
+5. **Forgot Password**
+- Endpoint: `/forgot_password`
+- Method: `POST`
+- Request Body:
+```json
+{
+    "email": "johndoe@example.com"
+}
+```
+
+
+6. **Reset Password**
+- Endpoint: `/reset_password`
+- Method: `POST`
+- Request Body:
+```json
+{
+    "email": "johndoe@example.com",
+    "new_password": "a-new-password", // "String" type
+    "reset_token": "get-reset-token-from-frontend-url-param-&-put-here",
+}
+```
+
 ## Contributing
 We welcome contributions to Secure-auth. If you find a bug or have a feature request, please open an issue or submit a pull request.
 
