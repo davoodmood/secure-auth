@@ -8,7 +8,10 @@ use actix_web::{web, App, HttpServer, middleware};
 use dotenv::dotenv;
 use env_logger;
 use crate::db::init_database;
-use crate::middlewares::jwt::JwtMiddleware; 
+use crate::middlewares::{
+    jwt::JwtMiddleware, 
+    rate_limiter::RateLimiter
+}; 
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
@@ -18,11 +21,13 @@ async fn main() -> std::io::Result<()> {
     env_logger::init();
 
     let db = init_database().await;
-    
+    let rate_limiter = RateLimiter::new(); 
+
     HttpServer::new(move || {
         App::new()
             .wrap(middleware::Logger::default())
             .app_data(web::Data::new(db.clone()))
+            .wrap(rate_limiter.clone())
             .wrap(JwtMiddleware)
             .route("/register", web::post().to(handlers::auth::register_user))
             .route("/login", web::post().to(handlers::auth::login_user))
