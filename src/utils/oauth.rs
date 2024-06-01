@@ -46,7 +46,7 @@ pub fn discord_client() -> Result<BasicClient, Box<dyn std::error::Error>> {
 }
 
 
-pub fn apple_client() -> Result<BasicClient, Box<dyn std::error::Error>> {
+pub fn _apple_client() -> Result<BasicClient, Box<dyn std::error::Error>> {
     let client_id = ClientId::new(env::var("APPLE_CLIENT_ID")?);
     let client_secret = ClientSecret::new(env::var("APPLE_CLIENT_SECRET")?);
 
@@ -57,7 +57,7 @@ pub fn apple_client() -> Result<BasicClient, Box<dyn std::error::Error>> {
         .set_redirect_uri(RedirectUrl::new("http://localhost:8080/auth/apple/callback".to_string())?))
 }
 
-pub fn twitter_client() -> Result<BasicClient, Box<dyn std::error::Error>> {
+pub fn _twitter_client() -> Result<BasicClient, Box<dyn std::error::Error>> {
     let client_id = ClientId::new(env::var("TWITTER_CLIENT_ID")?);
     let client_secret = ClientSecret::new(env::var("TWITTER_CLIENT_SECRET")?);
 
@@ -68,7 +68,7 @@ pub fn twitter_client() -> Result<BasicClient, Box<dyn std::error::Error>> {
         .set_redirect_uri(RedirectUrl::new("http://localhost:8080/auth/twitter/callback".to_string())?))
 }
 
-pub fn github_client() -> Result<BasicClient, Box<dyn std::error::Error>> {
+pub fn _github_client() -> Result<BasicClient, Box<dyn std::error::Error>> {
     let client_id = ClientId::new(env::var("GITHUB_CLIENT_ID")?);
     let client_secret = ClientSecret::new(env::var("GITHUB_CLIENT_SECRET")?);
 
