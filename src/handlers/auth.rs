@@ -1,7 +1,7 @@
 use std::{collections::HashMap, env};
 use actix_session::Session;
 use actix_web::{http::header, web, HttpResponse, Responder, ResponseError};
-use chrono::Utc;
+use chrono::{Duration, Utc};
 use mongodb::{
     bson::{self, doc, oid::ObjectId, Bson}, Database
 };
@@ -16,8 +16,6 @@ use otpauth::TOTP;
 use qrcode::{QrCode, render::svg};
 use std::time::{SystemTime, UNIX_EPOCH};
 use reqwest::Client as ReqwestClient; // Correct import for reqwest Client
-
-
 use crate::{models::{communication::CommunicationPreferences, user::User}, utils::{crypto::{decrypt, encrypt}, mfa::{generate_recovery_codes, generate_totp_secret}, oauth::{discord_client, facebook_client, google_client}}};
 use crate::utils::{
     verification::{
@@ -36,6 +34,10 @@ use crate::utils::{
     },
     txt::send_verification_text,
 };
+
+const MAX_FAILED_ATTEMPTS: u32 = 5;
+const LOCKOUT_DURATION_MINUTES: i64 = 15;
+
 
 struct Username(String);
 
@@ -259,6 +261,8 @@ pub async fn register_user(
         created: now,
         updated: now,
         last_logged_in: None,
+        failed_login_attempts: 0,
+        lockout_until: None,
     };
 
     if let Some(phone) = &phone {
@@ -372,6 +376,13 @@ pub async fn login_user(db: web::Data<Database>, form: web::Json<UserLogin>) -> 
         return HttpResponse::Unauthorized().json(json!({"message": "Please verify your email or phone to access the services"}));
     }
 
+    // Check if account is locked
+    if let Some(lockout_until) = user.lockout_until {
+        if Utc::now().timestamp() < lockout_until {
+            return HttpResponse::Forbidden().json(json!({"message": "Account is temporarily locked."}));
+        }
+    }
+
     if let Ok(valid) = verify(&form.password, &user.password) {
         if valid {
             if user.mfa_enabled.unwrap_or(false) {
@@ -393,8 +404,11 @@ pub async fn login_user(db: web::Data<Database>, form: web::Json<UserLogin>) -> 
                     Ok(token) => {
                         let timestamp = Utc::now().timestamp(); // Update last_logged_in field
                         // Update the user in the database
-                        let filter = doc! { "_id": user.id.clone() };
-                        let update = doc! { "$set": { "last_logged_in": timestamp } };
+                        let update = doc! { "$set": { 
+                            "last_logged_in": timestamp,
+                            "failed_login_attempts": 0,
+                            "lockout_until": Bson::Null,
+                        } };
         
                         if let Err(_) = collection.update_one(filter, update, None).await {
                             return HttpResponse::InternalServerError().finish();
@@ -407,8 +421,28 @@ pub async fn login_user(db: web::Data<Database>, form: web::Json<UserLogin>) -> 
             }
         }
     }
+    // Handle failed login attempt
+    let failed_attempts = user.failed_login_attempts + 1;
+    let lockout_until = if failed_attempts >= MAX_FAILED_ATTEMPTS {
+        Some((Utc::now() + Duration::minutes(LOCKOUT_DURATION_MINUTES)).timestamp())
+    } else {
+        None
+    };
 
-    HttpResponse::Unauthorized().finish()
+    // Update user in database with new failed_attempts and lockout_until
+    let update = doc! {
+        "$set": {
+            "failed_login_attempts": failed_attempts,
+            "lockout_until": lockout_until,
+        }
+    };
+
+    if let Err(err) = collection.update_one(filter.clone(), update, None).await {
+        println!("Error updating user: {:?}", err);
+        return HttpResponse::InternalServerError().finish();
+    }
+
+    HttpResponse::Unauthorized().json(json!({"message": "Invalid credentials."}))
 }
 
 /*
@@ -803,6 +837,8 @@ pub async fn verify_mfa(db: web::Data<Database>, user_id: web::Path<String>, for
                     "$set": {
                         "is_mfa_required": false,
                         "last_logged_in": timestamp,
+                        "failed_login_attempts": 0,
+                        "lockout_until": Bson::Null,
                     }
                 };
 
@@ -815,6 +851,27 @@ pub async fn verify_mfa(db: web::Data<Database>, user_id: web::Path<String>, for
             Err(_) => return HttpResponse::InternalServerError().finish(),
         }
     } else {
+        // Handle failed login attempt
+        let failed_attempts = user.failed_login_attempts + 1;
+        let lockout_until = if failed_attempts >= MAX_FAILED_ATTEMPTS {
+            Some((Utc::now() + Duration::minutes(LOCKOUT_DURATION_MINUTES)).timestamp())
+        } else {
+            None
+        };
+
+        // Update user in database with new failed_attempts and lockout_until
+        let update = doc! {
+            "$set": {
+                "failed_login_attempts": failed_attempts,
+                "lockout_until": lockout_until,
+            }
+        };
+
+        if let Err(err) = collection.update_one(filter.clone(), update, None).await {
+            println!("Error updating user: {:?}", err);
+            return HttpResponse::InternalServerError().finish();
+        }
+
         HttpResponse::Unauthorized().json(json!({"message": "MFA verification failed"}))
     }
 }
@@ -1213,12 +1270,22 @@ pub async fn google_callback(
                     Err(_) => return HttpResponse::InternalServerError().json(json!({"message": "Failed to initiate MFA process"})),
                 }
             } else {
+                // Check if account is locked
+                if let Some(lockout_until) = user.lockout_until {
+                    if Utc::now().timestamp() < lockout_until {
+                        return HttpResponse::Forbidden().json(json!({"message": "Account is temporarily locked."}));
+                    }
+                }
                 match create_token(&user.username) {
                     Ok(token) => {
                         let timestamp = Utc::now().timestamp(); // Update last_logged_in field
                         // Update the user in the database
                         let filter = doc! { "_id": user.id.clone() };
-                        let update = doc! { "$set": { "last_logged_in": timestamp } };
+                        let update = doc! { "$set": { 
+                            "last_logged_in": timestamp,
+                            "failed_login_attempts": 0,
+                            "lockout_until": Bson::Null, 
+                        } };
         
                         if let Err(_) = collection.update_one(filter, update, None).await {
                             return HttpResponse::InternalServerError().finish();
@@ -1255,6 +1322,8 @@ pub async fn google_callback(
                 created: chrono::Utc::now().timestamp(),
                 updated: chrono::Utc::now().timestamp(),
                 last_logged_in: Some(chrono::Utc::now().timestamp()),
+                failed_login_attempts: 0,
+                lockout_until: None,
             };
             let insert_result = collection.insert_one(new_user.clone(), None).await;
 
@@ -1371,12 +1440,22 @@ pub async fn facebook_callback(
                     Err(_) => return HttpResponse::InternalServerError().json(json!({"message": "Failed to initiate MFA process"})),
                 }
             } else {
+                // Check if account is locked
+                if let Some(lockout_until) = user.lockout_until {
+                    if Utc::now().timestamp() < lockout_until {
+                        return HttpResponse::Forbidden().json(json!({"message": "Account is temporarily locked."}));
+                    }
+                }
                 match create_token(&user.username) {
                     Ok(token) => {
                         let timestamp = Utc::now().timestamp(); // Update last_logged_in field
                         // Update the user in the database
                         let filter = doc! { "_id": user.id.clone() };
-                        let update = doc! { "$set": { "last_logged_in": timestamp } };
+                        let update = doc! { "$set": { 
+                            "last_logged_in": timestamp,
+                            "failed_login_attempts": 0,
+                            "lockout_until": Bson::Null, 
+                        } };
         
                         if let Err(_) = collection.update_one(filter, update, None).await {
                             return HttpResponse::InternalServerError().finish();
@@ -1411,6 +1490,8 @@ pub async fn facebook_callback(
                 created: chrono::Utc::now().timestamp(),
                 updated: chrono::Utc::now().timestamp(),
                 last_logged_in: Some(chrono::Utc::now().timestamp()),
+                failed_login_attempts: 0,
+                lockout_until: None,
             };
             let insert_result = collection.insert_one(new_user.clone(), None).await;
 
@@ -1526,12 +1607,22 @@ pub async fn discord_callback(
                     Err(_) => return HttpResponse::InternalServerError().json(json!({"message": "Failed to initiate MFA process"})),
                 }
             } else {
+                // Check if account is locked
+                if let Some(lockout_until) = user.lockout_until {
+                    if Utc::now().timestamp() < lockout_until {
+                        return HttpResponse::Forbidden().json(json!({"message": "Account is temporarily locked."}));
+                    }
+                }
                 match create_token(&user.username) {
                     Ok(token) => {
                         let timestamp = Utc::now().timestamp(); // Update last_logged_in field
                         // Update the user in the database
                         let filter = doc! { "_id": user.id.clone() };
-                        let update = doc! { "$set": { "last_logged_in": timestamp } };
+                        let update = doc! { "$set": { 
+                            "last_logged_in": timestamp,
+                            "failed_login_attempts": 0,
+                            "lockout_until": Bson::Null, 
+                        } };
         
                         if let Err(_) = collection.update_one(filter, update, None).await {
                             return HttpResponse::InternalServerError().finish();
@@ -1566,6 +1657,8 @@ pub async fn discord_callback(
                 created: chrono::Utc::now().timestamp(),
                 updated: chrono::Utc::now().timestamp(),
                 last_logged_in: Some(chrono::Utc::now().timestamp()),
+                failed_login_attempts: 0,
+                lockout_until: None,
             };
             let insert_result = collection.insert_one(new_user.clone(), None).await;
 
