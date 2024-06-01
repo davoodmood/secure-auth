@@ -4,7 +4,8 @@ mod handlers;
 mod middlewares;
 mod utils;
 
-use actix_web::{web, App, HttpServer, middleware};
+use actix_web::{web, App, HttpServer, middleware, cookie::Key};
+use actix_session::{SessionMiddleware, storage::CookieSessionStore};
 use dotenv::dotenv;
 use env_logger;
 use crate::db::init_database;
@@ -19,6 +20,7 @@ async fn main() -> std::io::Result<()> {
     std::env::set_var("RUST_LOG", "debug");
     std::env::set_var("RUST_BACKTRACE", "1");
     env_logger::init();
+    let session_key = Key::generate();
 
     let db = init_database().await;
     let rate_limiter = RateLimiter::new(); 
@@ -27,6 +29,10 @@ async fn main() -> std::io::Result<()> {
         App::new()
             .wrap(middleware::Logger::default())
             .app_data(web::Data::new(db.clone()))
+            .wrap(SessionMiddleware::new(
+                CookieSessionStore::default(),
+                session_key.clone(),
+            ))
             .wrap(rate_limiter.clone())
             .wrap(JwtMiddleware)
             .route("/register", web::post().to(handlers::auth::register_user))
@@ -39,6 +45,12 @@ async fn main() -> std::io::Result<()> {
             .route("/verify_mfa/{user_id}", web::post().to(handlers::auth::verify_mfa))
             .route("/recover_mfa/{user_id}", web::post().to(handlers::auth::recover_mfa))
             .route("/disable_mfa/{user_id}", web::post().to(handlers::auth::disable_mfa))
+            .route("/auth/google/login", web::get().to(handlers::auth::google_login)) //@dev test these
+            .route("/auth/google/callback", web::get().to(handlers::auth::google_callback))
+            .route("/auth/facebook/login", web::get().to(handlers::auth::facebook_login))
+            .route("/auth/facebook/callback", web::get().to(handlers::auth::facebook_callback))
+            .route("/auth/discord/login", web::get().to(handlers::auth::discord_login))
+            .route("/auth/discord/callback", web::get().to(handlers::auth::discord_callback))
             // Define more routes as needed
     })
     .bind("127.0.0.1:8080")?

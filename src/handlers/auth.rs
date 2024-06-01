@@ -1,13 +1,13 @@
 use std::{collections::HashMap, env};
-
+use actix_session::Session;
 use actix_web::{http::header, web, HttpResponse, Responder, ResponseError};
 use chrono::Utc;
 use mongodb::{
     bson::{self, doc, oid::ObjectId, Bson}, Database
 };
+use oauth2::{AuthorizationCode, CsrfToken, StandardTokenResponse, TokenResponse as OAuth2TokenResponse};
 use regex::Regex;
 use bcrypt::{hash, DEFAULT_COST, verify};
-use jsonwebtoken::{encode, Header, EncodingKey};
 use base64::{engine::general_purpose, Engine};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -15,9 +15,10 @@ use thiserror::Error;
 use otpauth::TOTP;
 use qrcode::{QrCode, render::svg};
 use std::time::{SystemTime, UNIX_EPOCH};
+use reqwest::Client as ReqwestClient; // Correct import for reqwest Client
 
 
-use crate::{models::{communication::CommunicationPreferences, user::User}, utils::{crypto::{decrypt, encrypt}, mfa::{generate_recovery_codes, generate_totp_secret}}};
+use crate::{models::{communication::CommunicationPreferences, user::User}, utils::{crypto::{decrypt, encrypt}, mfa::{generate_recovery_codes, generate_totp_secret}, oauth::{discord_client, facebook_client, google_client}}};
 use crate::utils::{
     verification::{
         generate_email_verification_token,
@@ -257,7 +258,7 @@ pub async fn register_user(
         },
         created: now,
         updated: now,
-        last_logged_in: None, 
+        last_logged_in: None,
     };
 
     if let Some(phone) = &phone {
@@ -1085,3 +1086,500 @@ pub async fn disable_mfa(
         HttpResponse::Unauthorized().json(json!({"message": "MFA verification failed"}))
     }
 }
+
+
+/*
+  OAUTH2 HANDLERS
+*/
+
+//@notice Google Oauth2 Authenticator 
+// async fn google_login() -> impl Responder {
+//     let client = oauth::google_client();
+//     let (auth_url, _csrf_token) = client.authorize_url(CsrfToken::new_random).url();
+    
+//     HttpResponse::Found().header("Location", auth_url.to_string()).finish()
+// }
+
+// async fn google_callback(params: web::Query<oauth2::StandardTokenResponse>) -> impl Responder {
+//     // Exchange the code for a token, then use the token to fetch user info
+//     HttpResponse::Ok().body("Google callback")
+// }
+
+#[derive(Debug, Deserialize)]
+pub struct OAuth2Params {
+    pub code: String,
+    pub csrf_token: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GoogleUserInfo {
+    email: String,
+    name: String,
+}
+
+async fn fetch_google_user_info(token: &StandardTokenResponse<oauth2::EmptyExtraTokenFields, oauth2::basic::BasicTokenType>) -> Result<GoogleUserInfo, Box<dyn std::error::Error>> {
+    let client = ReqwestClient::new();
+    let user_info_resp = client
+        .get("https://www.googleapis.com/oauth2/v3/userinfo")
+        .bearer_auth(token.access_token().secret())
+        .send()
+        .await?
+        .json::<GoogleUserInfo>()
+        .await?;
+
+    Ok(user_info_resp)
+}
+
+// Google OAuth2 login endpoint
+pub async fn google_login(session: Session) -> impl Responder {
+    let client = match google_client() {
+        Ok(client) => client,
+        Err(err) => return HttpResponse::InternalServerError().body(format!("Failed to create Google client: {}", err)),
+    };
+
+    let (auth_url, csrf_token) = client.authorize_url(CsrfToken::new_random).url();
+
+    // Store the CSRF token in the session
+    if let Err(err) = session.insert("csrf_token", csrf_token.secret().clone()) {
+        return HttpResponse::InternalServerError().body(format!("Failed to store CSRF token: {}", err));
+    }
+
+    // Append the CSRF token as a query parameter in the authorization URL
+    let auth_url_with_csrf = format!("{}&csrf_token={}", auth_url, csrf_token.secret());
+
+    HttpResponse::Found().append_header(("Location", auth_url_with_csrf)).finish()
+}
+
+// Google OAuth2 callback endpoint
+pub async fn google_callback(
+    db: web::Data<Database>,
+    session: Session,
+    query: web::Query<OAuth2Params>,
+) -> impl Responder {
+    let client = match google_client() {
+        Ok(client) => client,
+        Err(err) => return HttpResponse::InternalServerError().body(format!("Failed to create Google client: {}", err)),
+    };
+
+    // Retrieve the CSRF token from the session
+    let csrf_token_in_session: Option<String> = match session.get("csrf_token") {
+        Ok(Some(token)) => Some(token),
+        Ok(None) => return HttpResponse::BadRequest().body("CSRF token not found in session."),
+        Err(err) => return HttpResponse::InternalServerError().body(format!("Failed to retrieve CSRF token: {}", err)),
+    };
+
+    //@dev test this section
+    // Ensure CSRF token from the query parameter matches the one in the session
+    let csrf_token_from_query = query.csrf_token.clone();
+    if csrf_token_in_session != Some(csrf_token_from_query) {
+        return HttpResponse::BadRequest().body("CSRF token mismatch.");
+    }
+
+    let token_result = client.exchange_code(AuthorizationCode::new(query.code.clone()))
+        .request_async(oauth2::reqwest::async_http_client)
+        .await;
+
+    let token = match token_result {
+        Ok(token) => token,
+        Err(err) => return HttpResponse::InternalServerError().body(format!("Failed to exchange code for token: {}", err)),
+    };
+
+    let user_info_result = fetch_google_user_info(&token).await;
+    let user_info = match user_info_result {
+        Ok(info) => info,
+        Err(err) => return HttpResponse::InternalServerError().body(format!("Failed to fetch user info: {}", err)),
+    };
+
+    let collection = db.collection::<User>("users");
+    let filter = doc! { "email": &user_info.email };
+    let user_option = collection.find_one(filter.clone(), None).await;
+
+    match user_option {
+        Ok(Some(user)) => {
+            // User already exists
+            // HttpResponse::Ok().body(format!("Welcome back, {}!", user.username))
+            if user.mfa_enabled.unwrap_or(false) {
+                // @dev: add some signal field to db that the user has authenticated password 
+                //       and awaits mfa authentication, so a user cannot call the mfa_verified directly. 
+                // Update user record to disable MFA
+                let update = doc! {
+                    "$set": {
+                        "is_mfa_required": true,
+                    }
+                };
+
+                match collection.update_one(filter, update, None).await {
+                    Ok(_) => return HttpResponse::Ok().json(json!({"message": "Proceed to MFA stage", "mfa_required": true})),
+                    Err(_) => return HttpResponse::InternalServerError().json(json!({"message": "Failed to initiate MFA process"})),
+                }
+            } else {
+                match create_token(&user.username) {
+                    Ok(token) => {
+                        let timestamp = Utc::now().timestamp(); // Update last_logged_in field
+                        // Update the user in the database
+                        let filter = doc! { "_id": user.id.clone() };
+                        let update = doc! { "$set": { "last_logged_in": timestamp } };
+        
+                        if let Err(_) = collection.update_one(filter, update, None).await {
+                            return HttpResponse::InternalServerError().finish();
+                        }
+                        let user_response: UserResponse = user.into();
+                        return HttpResponse::Ok().json(TokenResponse { token, user: user_response });
+                    },
+                    Err(_) => return HttpResponse::InternalServerError().finish(),
+                }
+            }
+        }
+        Ok(None) => {
+            // User does not exist, create a new user
+            let new_user = User {
+                id: None,
+                username: user_info.name,
+                // prompt a step that if user's password was an empty string 
+                // in the database or an Option with null value. user must then select a password at this stage of login
+                password: "".to_string(), // No password needed for OAuth users 
+                email: user_info.email.clone(),
+                onboarding: true,
+                phone: None,
+                tel: None,
+                email_verified: Some(true),
+                phone_verified: None,
+                email_verification_token: None,
+                phone_verification_token: None,
+                password_reset_token: None,
+                is_mfa_required: false,
+                mfa_enabled: None,
+                mfa_secret: None,
+                mfa_recovery_codes: None,
+                communication_preferences: CommunicationPreferences { receive_promotions_email: Some(true), receive_promotions_sms: Some(false) },
+                created: chrono::Utc::now().timestamp(),
+                updated: chrono::Utc::now().timestamp(),
+                last_logged_in: Some(chrono::Utc::now().timestamp()),
+            };
+            let insert_result = collection.insert_one(new_user.clone(), None).await;
+
+            match insert_result {
+                Ok(_) => {
+                    let user_response: UserResponse = new_user.into();
+                    HttpResponse::Ok().json(user_response)
+                    // HttpResponse::Ok().body(format!("Welcome, {}!", user_info.name))
+                },
+                Err(err) => HttpResponse::InternalServerError().body(format!("Failed to create user: {}", err)),
+            }
+        }
+        Err(err) => HttpResponse::InternalServerError().body(format!("Database query failed: {}", err)),
+    }
+}
+
+
+
+// FACEBOOK
+pub async fn facebook_login(session: Session) -> impl Responder {
+    let client = match facebook_client() {
+        Ok(client) => client,
+        Err(err) => return HttpResponse::InternalServerError().body(format!("Failed to create Facebook client: {}", err)),
+    };
+
+    let (auth_url, csrf_token) = client.authorize_url(CsrfToken::new_random).url();
+
+    // Store the CSRF token in the session
+    if let Err(err) = session.insert("csrf_token", csrf_token.secret().clone()) {
+        return HttpResponse::InternalServerError().body(format!("Failed to store CSRF token: {}", err));
+    }
+
+    // Append the CSRF token as a query parameter in the authorization URL
+    let auth_url_with_csrf = format!("{}&csrf_token={}", auth_url, csrf_token.secret());
+
+    HttpResponse::Found().append_header(("Location", auth_url_with_csrf)).finish()
+}
+
+#[derive(Debug, Deserialize)]
+struct FacebookUserInfo {
+    email: String,
+    name: String,
+}
+
+async fn fetch_facebook_user_info(token: &StandardTokenResponse<oauth2::EmptyExtraTokenFields, oauth2::basic::BasicTokenType>) -> Result<FacebookUserInfo, Box<dyn std::error::Error>> {
+    let client = ReqwestClient::new();
+    let user_info_resp = client
+        .get("https://graph.facebook.com/me?fields=email,name")
+        .bearer_auth(token.access_token().secret())
+        .send()
+        .await?
+        .json::<FacebookUserInfo>()
+        .await?;
+
+    Ok(user_info_resp)
+}
+
+pub async fn facebook_callback(
+    db: web::Data<Database>,
+    session: Session,
+    query: web::Query<OAuth2Params>,
+) -> impl Responder {
+    let client = match facebook_client() {
+        Ok(client) => client,
+        Err(err) => return HttpResponse::InternalServerError().body(format!("Failed to create Facebook client: {}", err)),
+    };
+
+    // Retrieve the CSRF token from the session
+    let csrf_token_in_session = match session.get("csrf_token") {
+        Ok(Some(token)) => Some(token),
+        Ok(None) => return HttpResponse::BadRequest().body("CSRF token not found in session."),
+        Err(err) => return HttpResponse::InternalServerError().body(format!("Failed to retrieve CSRF token: {}", err)),
+    };
+
+    //@dev test this section
+    // Ensure CSRF token from the query parameter matches the one in the session
+    let csrf_token_from_query = query.csrf_token.clone();
+    if Some(csrf_token_from_query) != csrf_token_in_session {
+        return HttpResponse::BadRequest().body("CSRF token mismatch.");
+    }
+
+    let token_result = client.exchange_code(AuthorizationCode::new(query.code.clone()))
+        .request_async(oauth2::reqwest::async_http_client)
+        .await;
+
+    let token = match token_result {
+        Ok(token) => token,
+        Err(err) => return HttpResponse::InternalServerError().body(format!("Failed to exchange code for token: {}", err)),
+    };
+
+    let user_info_result = fetch_facebook_user_info(&token).await;
+    let user_info = match user_info_result {
+        Ok(info) => info,
+        Err(err) => return HttpResponse::InternalServerError().body(format!("Failed to fetch user info: {}", err)),
+    };
+
+    let collection = db.collection::<User>("users");
+    let filter = doc! { "email": &user_info.email };
+    let user_option = collection.find_one(filter.clone(), None).await;
+
+    match user_option {
+        Ok(Some(user)) => {
+            // User already exists
+            if user.mfa_enabled.unwrap_or(false) {
+                // Update user record to disable MFA
+                let update = doc! {
+                    "$set": {
+                        "is_mfa_required": true,
+                    }
+                };
+
+                match collection.update_one(filter, update, None).await {
+                    Ok(_) => return HttpResponse::Ok().json(json!({"message": "Proceed to MFA stage", "mfa_required": true})),
+                    Err(_) => return HttpResponse::InternalServerError().json(json!({"message": "Failed to initiate MFA process"})),
+                }
+            } else {
+                match create_token(&user.username) {
+                    Ok(token) => {
+                        let timestamp = Utc::now().timestamp(); // Update last_logged_in field
+                        // Update the user in the database
+                        let filter = doc! { "_id": user.id.clone() };
+                        let update = doc! { "$set": { "last_logged_in": timestamp } };
+        
+                        if let Err(_) = collection.update_one(filter, update, None).await {
+                            return HttpResponse::InternalServerError().finish();
+                        }
+                        let user_response: UserResponse = user.into();
+                        return HttpResponse::Ok().json(TokenResponse { token, user: user_response });
+                    },
+                    Err(_) => return HttpResponse::InternalServerError().finish(),
+                }
+            }
+        }
+        Ok(None) => {
+            // User does not exist, create a new user
+            let new_user = User {
+                id: None,
+                username: user_info.name,
+                password: "".to_string(), // No password needed for OAuth users 
+                email: user_info.email.clone(),
+                onboarding: true,
+                phone: None,
+                tel: None,
+                email_verified: Some(true),
+                phone_verified: None,
+                email_verification_token: None,
+                phone_verification_token: None,
+                password_reset_token: None,
+                is_mfa_required: false,
+                mfa_enabled: None,
+                mfa_secret: None,
+                mfa_recovery_codes: None,
+                communication_preferences: CommunicationPreferences { receive_promotions_email: Some(true), receive_promotions_sms: Some(false) },
+                created: chrono::Utc::now().timestamp(),
+                updated: chrono::Utc::now().timestamp(),
+                last_logged_in: Some(chrono::Utc::now().timestamp()),
+            };
+            let insert_result = collection.insert_one(new_user.clone(), None).await;
+
+            match insert_result {
+                Ok(_) => {
+                    let user_response: UserResponse = new_user.into();
+                    HttpResponse::Ok().json(user_response)
+                },
+                Err(err) => HttpResponse::InternalServerError().body(format!("Failed to create user: {}", err)),
+            }
+        }
+        Err(err) => HttpResponse::InternalServerError().body(format!("Database query failed: {}", err)),
+    }
+}
+
+
+// DISCORD
+pub async fn discord_login(session: Session) -> impl Responder {
+    let client = match discord_client() {
+        Ok(client) => client,
+        Err(err) => return HttpResponse::InternalServerError().body(format!("Failed to create Discord client: {}", err)),
+    };
+
+    let (auth_url, csrf_token) = client.authorize_url(CsrfToken::new_random).url();
+
+    // Store the CSRF token in the session
+    if let Err(err) = session.insert("csrf_token", csrf_token.secret().clone()) {
+        return HttpResponse::InternalServerError().body(format!("Failed to store CSRF token: {}", err));
+    }
+
+    // Append the CSRF token as a query parameter in the authorization URL
+    let auth_url_with_csrf = format!("{}&csrf_token={}", auth_url, csrf_token.secret());
+
+    HttpResponse::Found().append_header(("Location", auth_url_with_csrf)).finish()
+}
+
+
+#[derive(Debug, Deserialize)]
+struct DiscordUserInfo {
+    email: String,
+    username: String,
+}
+
+async fn fetch_discord_user_info(token: &StandardTokenResponse<oauth2::EmptyExtraTokenFields, oauth2::basic::BasicTokenType>) -> Result<DiscordUserInfo, Box<dyn std::error::Error>> {
+    let client = ReqwestClient::new();
+    let user_info_resp = client
+        .get("https://discord.com/api/users/@me")
+        .bearer_auth(token.access_token().secret())
+        .send()
+        .await?
+        .json::<DiscordUserInfo>()
+        .await?;
+
+    Ok(user_info_resp)
+}
+
+pub async fn discord_callback(
+    db: web::Data<Database>,
+    session: Session,
+    query: web::Query<OAuth2Params>,
+) -> impl Responder {
+    let client = match discord_client() {
+        Ok(client) => client,
+        Err(err) => return HttpResponse::InternalServerError().body(format!("Failed to create Discord client: {}", err)),
+    };
+
+    // Retrieve the CSRF token from the session
+    let csrf_token_in_session: Option<String> = match session.get("csrf_token") {
+        Ok(Some(token)) => Some(token),
+        Ok(None) => return HttpResponse::BadRequest().body("CSRF token not found in session."),
+        Err(err) => return HttpResponse::InternalServerError().body(format!("Failed to retrieve CSRF token: {}", err)),
+    };
+
+    //@dev test this section
+    // Ensure CSRF token from the query parameter matches the one in the session
+    let csrf_token_from_query = query.csrf_token.clone();
+    if csrf_token_in_session != Some(csrf_token_from_query) {
+        return HttpResponse::BadRequest().body("CSRF token mismatch.");
+    }
+
+    let token_result = client.exchange_code(AuthorizationCode::new(query.code.clone()))
+        .request_async(oauth2::reqwest::async_http_client)
+        .await;
+
+    let token = match token_result {
+        Ok(token) => token,
+        Err(err) => return HttpResponse::InternalServerError().body(format!("Failed to exchange code for token: {}", err)),
+    };
+
+    let user_info_result = fetch_discord_user_info(&token).await;
+    let user_info = match user_info_result {
+        Ok(info) => info,
+        Err(err) => return HttpResponse::InternalServerError().body(format!("Failed to fetch user info: {}", err)),
+    };
+
+    let collection = db.collection::<User>("users");
+    let filter = doc! { "email": &user_info.email };
+    let user_option = collection.find_one(filter.clone(), None).await;
+
+    match user_option {
+        Ok(Some(user)) => {
+            // User already exists
+            if user.mfa_enabled.unwrap_or(false) {
+                // Update user record to disable MFA
+                let update = doc! {
+                    "$set": {
+                        "is_mfa_required": true,
+                    }
+                };
+
+                match collection.update_one(filter, update, None).await {
+                    Ok(_) => return HttpResponse::Ok().json(json!({"message": "Proceed to MFA stage", "mfa_required": true})),
+                    Err(_) => return HttpResponse::InternalServerError().json(json!({"message": "Failed to initiate MFA process"})),
+                }
+            } else {
+                match create_token(&user.username) {
+                    Ok(token) => {
+                        let timestamp = Utc::now().timestamp(); // Update last_logged_in field
+                        // Update the user in the database
+                        let filter = doc! { "_id": user.id.clone() };
+                        let update = doc! { "$set": { "last_logged_in": timestamp } };
+        
+                        if let Err(_) = collection.update_one(filter, update, None).await {
+                            return HttpResponse::InternalServerError().finish();
+                        }
+                        let user_response: UserResponse = user.into();
+                        return HttpResponse::Ok().json(TokenResponse { token, user: user_response });
+                    },
+                    Err(_) => return HttpResponse::InternalServerError().finish(),
+                }
+            }
+        }
+        Ok(None) => {
+            // User does not exist, create a new user
+            let new_user = User {
+                id: None,
+                username: user_info.username,
+                password: "".to_string(), // No password needed for OAuth users 
+                email: user_info.email.clone(),
+                onboarding: true,
+                phone: None,
+                tel: None,
+                email_verified: Some(true),
+                phone_verified: None,
+                email_verification_token: None,
+                phone_verification_token: None,
+                password_reset_token: None,
+                is_mfa_required: false,
+                mfa_enabled: None,
+                mfa_secret: None,
+                mfa_recovery_codes: None,
+                communication_preferences: CommunicationPreferences { receive_promotions_email: Some(true), receive_promotions_sms: Some(false) },
+                created: chrono::Utc::now().timestamp(),
+                updated: chrono::Utc::now().timestamp(),
+                last_logged_in: Some(chrono::Utc::now().timestamp()),
+            };
+            let insert_result = collection.insert_one(new_user.clone(), None).await;
+
+            match insert_result {
+                Ok(_) => {
+                    let user_response: UserResponse = new_user.into();
+                    HttpResponse::Ok().json(user_response)
+                },
+                Err(err) => HttpResponse::InternalServerError().body(format!("Failed to create user: {}", err)),
+            }
+        }
+        Err(err) => HttpResponse::InternalServerError().body(format!("Database query failed: {}", err)),
+    }
+}
+
+
+

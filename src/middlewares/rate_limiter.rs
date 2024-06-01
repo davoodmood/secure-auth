@@ -1,10 +1,7 @@
 use actix_web::{
     body::EitherBody, dev::{forward_ready, Service, ServiceRequest, ServiceResponse, Transform}, error::ErrorInternalServerError, http::StatusCode, web, Error, HttpResponse
 };
-use std::{
-    future::{ready, Ready},
-    rc::Rc,
-};
+use std::future::{ready, Ready};
 use futures::{future::LocalBoxFuture, FutureExt};
 use std::{collections::HashMap, sync::Arc};
 use std::sync::Mutex;
@@ -66,7 +63,7 @@ where
         // Get the path of the request
         let path = req.uri().path().to_owned();
 
-        // List of public routes that don't require JWT verification
+        // List of public routes that require rate limiting
         let protected_routes = vec![
             "/forgot_password", 
             "/reset_password",
