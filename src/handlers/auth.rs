@@ -69,12 +69,37 @@ impl Email {
 struct Password(String);
 
 impl Password {
-    pub fn new(password: &str) -> Result<Self, &'static str> {
-        if password.len() < 8 {
-            Err("Password must be at least 8 characters long")
-        } else {
-            Ok(Self(password.to_string()))
+    /// @notice: Password Policy Enforcement
+    // Added checks for the presence of uppercase, lowercase, digits, and special characters, 
+    // @returns  appropriate error messages if conditions are not met
+    pub fn new(password: &str) -> Result<Self, String> {
+        let min_length = 8;
+        let has_uppercase = password.chars().any(|c| c.is_uppercase());
+        let has_lowercase = password.chars().any(|c| c.is_lowercase());
+        let has_digits = password.chars().any(|c| c.is_digit(10));
+        let has_special_chars = password.chars().any(|c| "!@#$%^&*()_+-=[]{}|;:'\",.<>/?".contains(c));
+
+        if password.len() < min_length {
+            return Err(format!("Password must be at least {} characters long.", min_length));
         }
+        
+        if !has_uppercase {
+            return Err("Password must contain at least one uppercase letter.".to_string());
+        }
+        
+        if !has_lowercase {
+            return Err("Password must contain at least one lowercase letter.".to_string());
+        }
+        
+        if !has_digits {
+            return Err("Password must contain at least one digit.".to_string());
+        }
+        
+        if !has_special_chars {
+            return Err("Password must contain at least one special character.".to_string());
+        }
+
+        Ok(Self(password.to_string()))
     }
 }
 
