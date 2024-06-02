@@ -3,6 +3,7 @@ mod models;
 mod handlers;
 mod middlewares;
 mod utils;
+mod services;
 
 use actix_web::{web, App, HttpServer, middleware, cookie::Key};
 use actix_session::{SessionMiddleware, storage::CookieSessionStore};
@@ -11,8 +12,10 @@ use env_logger;
 use crate::db::init_database;
 use crate::middlewares::{
     jwt::JwtMiddleware, 
-    rate_limiter::RateLimiter
+    rate_limiter::RateLimiter,
+    permissions::PermissionMiddleware,
 }; 
+use utils::permissions::get_route_permissions;
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
@@ -23,7 +26,9 @@ async fn main() -> std::io::Result<()> {
     let session_key = Key::generate();
 
     let db = init_database().await;
-    let rate_limiter = RateLimiter::new(); 
+    let rate_limiter = RateLimiter::new();
+    let route_permissions = get_route_permissions();
+
 
     HttpServer::new(move || {
         App::new()
@@ -35,6 +40,7 @@ async fn main() -> std::io::Result<()> {
             ))
             .wrap(rate_limiter.clone())
             .wrap(JwtMiddleware)
+            .wrap(PermissionMiddleware::new(route_permissions.clone()))
             .route("/register", web::post().to(handlers::auth::register_user))
             .route("/login", web::post().to(handlers::auth::login_user))
             .route("/forgot_password", web::post().to(handlers::auth::forgot_password))

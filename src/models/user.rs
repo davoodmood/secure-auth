@@ -31,6 +31,7 @@ pub struct User {
     pub last_logged_in: Option<i64>, // Unix time for last login timestamp
     pub failed_login_attempts: u32,
     pub lockout_until: Option<i64>, // Unix time
+    pub permissions: i32,
     // pub data_privacy_settings_id: Option<ObjectId>, // Reference to DataPrivacySettings
     // pub failed_login_attempts: Option<i32>,
     // pub lockout_until: Option<DateTime<Utc>>,

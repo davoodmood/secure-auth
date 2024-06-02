@@ -16,7 +16,7 @@ use otpauth::TOTP;
 use qrcode::{QrCode, render::svg};
 use std::time::{SystemTime, UNIX_EPOCH};
 use reqwest::Client as ReqwestClient; // Correct import for reqwest Client
-use crate::{models::{communication::CommunicationPreferences, user::User}, utils::{crypto::{decrypt, encrypt}, mfa::{generate_recovery_codes, generate_totp_secret}, oauth::{discord_client, facebook_client, google_client}}};
+use crate::{models::{communication::CommunicationPreferences, user::User}, services::auth::roles::ROLE_USER, utils::{crypto::{decrypt, encrypt}, mfa::{generate_recovery_codes, generate_totp_secret}, oauth::{discord_client, facebook_client, google_client}}};
 use crate::utils::{
     verification::{
         generate_email_verification_token,
@@ -288,6 +288,7 @@ pub async fn register_user(
         last_logged_in: None,
         failed_login_attempts: 0,
         lockout_until: None,
+        permissions: ROLE_USER,
     };
 
     if let Some(phone) = &phone {
@@ -425,7 +426,7 @@ pub async fn login_user(db: web::Data<Database>, form: web::Json<UserLogin>) -> 
                     Err(_) => return HttpResponse::InternalServerError().json(json!({"message": "Failed to initiate MFA process"})),
                 }
             } else {
-                match create_token(&user.username) {
+                match create_token(&user.username, user.permissions) {
                     Ok(token) => {
                         let timestamp = Utc::now().timestamp(); // Update last_logged_in field
                         // Update the user in the database
@@ -854,7 +855,7 @@ pub async fn verify_mfa(db: web::Data<Database>, user_id: web::Path<String>, for
     let verified = totp.verify(code, period, timestamp);
 
     if verified {
-        match create_token(&user.username) {
+        match create_token(&user.username, user.permissions) {
             Ok(token) => {
                 let timestamp = Utc::now().timestamp(); // Update last_logged_in field
                 // Update the user in the database
@@ -1301,7 +1302,7 @@ pub async fn google_callback(
                         return HttpResponse::Forbidden().json(json!({"message": "Account is temporarily locked."}));
                     }
                 }
-                match create_token(&user.username) {
+                match create_token(&user.username, user.permissions) {
                     Ok(token) => {
                         let timestamp = Utc::now().timestamp(); // Update last_logged_in field
                         // Update the user in the database
@@ -1349,6 +1350,7 @@ pub async fn google_callback(
                 last_logged_in: Some(chrono::Utc::now().timestamp()),
                 failed_login_attempts: 0,
                 lockout_until: None,
+                permissions: ROLE_USER,
             };
             let insert_result = collection.insert_one(new_user.clone(), None).await;
 
@@ -1471,7 +1473,7 @@ pub async fn facebook_callback(
                         return HttpResponse::Forbidden().json(json!({"message": "Account is temporarily locked."}));
                     }
                 }
-                match create_token(&user.username) {
+                match create_token(&user.username, user.permissions) {
                     Ok(token) => {
                         let timestamp = Utc::now().timestamp(); // Update last_logged_in field
                         // Update the user in the database
@@ -1517,6 +1519,7 @@ pub async fn facebook_callback(
                 last_logged_in: Some(chrono::Utc::now().timestamp()),
                 failed_login_attempts: 0,
                 lockout_until: None,
+                permissions: ROLE_USER,
             };
             let insert_result = collection.insert_one(new_user.clone(), None).await;
 
@@ -1638,7 +1641,7 @@ pub async fn discord_callback(
                         return HttpResponse::Forbidden().json(json!({"message": "Account is temporarily locked."}));
                     }
                 }
-                match create_token(&user.username) {
+                match create_token(&user.username, user.permissions) {
                     Ok(token) => {
                         let timestamp = Utc::now().timestamp(); // Update last_logged_in field
                         // Update the user in the database
@@ -1684,6 +1687,7 @@ pub async fn discord_callback(
                 last_logged_in: Some(chrono::Utc::now().timestamp()),
                 failed_login_attempts: 0,
                 lockout_until: None,
+                permissions: ROLE_USER,
             };
             let insert_result = collection.insert_one(new_user.clone(), None).await;
 
