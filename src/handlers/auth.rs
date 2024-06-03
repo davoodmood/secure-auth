@@ -16,7 +16,7 @@ use otpauth::TOTP;
 use qrcode::{QrCode, render::svg};
 use std::time::{SystemTime, UNIX_EPOCH};
 use reqwest::Client as ReqwestClient; // Correct import for reqwest Client
-use crate::{models::{communication::CommunicationPreferences, user::{LoginAttempt, User}}, services::auth::roles::ROLE_USER, utils::{crypto::{decrypt, encrypt}, mfa::{generate_recovery_codes, generate_totp_secret}, oauth::{discord_client, facebook_client, google_client}, risk_assessment::{assess_login_risk, login_attempt_to_bson, RiskLevel}, verification::generate_otp}};
+use crate::{models::{communication::CommunicationPreferences, user::{LoginAttempt, User}}, services::auth::roles::ROLE_USER, utils::{crypto::{decrypt, encrypt}, email::send_otp, mfa::{generate_recovery_codes, generate_totp_secret}, oauth::{discord_client, facebook_client, google_client}, risk_assessment::{assess_login_risk, login_attempt_to_bson, RiskLevel}, verification::generate_otp}};
 use crate::utils::{
     verification::{
         generate_email_verification_token,
@@ -461,6 +461,9 @@ pub async fn login_user(db: web::Data<Database>, form: web::Json<UserLogin>, req
             if let Err(_) = collection.update_one(doc! { "_id": user_id.clone() }, update, None).await {
                 return HttpResponse::InternalServerError().json(json!({"message": "Failed to update user"}));
             }
+            if let Err(e) = send_otp(&user.email, &otp).await {
+                return HttpResponse::InternalServerError().json(json!({"message": format!("Failed to send OTP: {}", e)}));
+            }        
             // Send OTP to user via email/SMS (implementation needed)
             return HttpResponse::BadRequest()
                 .json(json!({"message": "Additional verification required. Check your email for the OTP"}));

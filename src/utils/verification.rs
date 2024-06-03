@@ -40,9 +40,3 @@ async fn store_otp(db: &Database, user_id: &ObjectId, otp_code: &str) {
     collection.update_one(filter, update, None).await.unwrap();
 }
 
-fn send_otp(email: &str, otp_code: &str) {
-    // Send the OTP code to the user's email or SMS
-    // This is a placeholder implementation
-    println!("Sending OTP code {} to email {}", otp_code, email);
-}
-
