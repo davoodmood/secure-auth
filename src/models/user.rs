@@ -40,6 +40,7 @@ pub struct User {
     pub mfa_enabled: Option<bool>,
     pub mfa_secret: Option<String>,  // This will store the TOTP secret, empty if MFA is not enabled
     pub mfa_recovery_codes: Option<Vec<String>>,
+    // pub profile_preferences: ProfilePreferences,
     pub communication_preferences: CommunicationPreferences, // Reference to CommunicationPreferences
     pub failed_login_attempts: u32,
     pub lockout_until: Option<i64>, // Unix time
