@@ -16,6 +16,7 @@ use crate::middlewares::{
     permissions::PermissionMiddleware,
 }; 
 use utils::permissions::get_route_permissions;
+// use services::localization::Localization;
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
@@ -28,6 +29,16 @@ async fn main() -> std::io::Result<()> {
     let db = init_database().await;
     let rate_limiter = RateLimiter::new();
     let route_permissions = get_route_permissions();
+
+    // let localization = Localization::new();
+
+    // let user_lang = "es-ES"; // For example, this can be dynamically set based on user preference
+
+    // let invalid_credentials_message = localization.get_message(user_lang, "invalid-credentials");
+    // let account_locked_message = localization.get_message(user_lang, "account-locked");
+
+    println!("{}", invalid_credentials_message);
+    println!("{}", account_locked_message);
 
 
     HttpServer::new(move || {

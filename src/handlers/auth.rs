@@ -461,10 +461,12 @@ pub async fn login_user(db: web::Data<Database>, form: web::Json<UserLogin>, req
             if let Err(_) = collection.update_one(doc! { "_id": user_id.clone() }, update, None).await {
                 return HttpResponse::InternalServerError().json(json!({"message": "Failed to update user"}));
             }
+
+            // Send OTP to user via email/SMS (implementation needed)
             if let Err(e) = send_otp(&user.email, &otp).await {
                 return HttpResponse::InternalServerError().json(json!({"message": format!("Failed to send OTP: {}", e)}));
-            }        
-            // Send OTP to user via email/SMS (implementation needed)
+            }  
+
             return HttpResponse::BadRequest()
                 .json(json!({"message": "Additional verification required. Check your email for the OTP"}));
         },
@@ -498,7 +500,7 @@ pub async fn login_user(db: web::Data<Database>, form: web::Json<UserLogin>, req
                 }
             } else {
                 match create_token(&user.username, user.permissions) {
-                    Ok(token) => {                       
+                    Ok(token) => {
                         
                         // Convert LoginAttempt to BSON
                         // let login_attempt_bson: bson::Document = login_attempt_to_bson(&login_attempt);
