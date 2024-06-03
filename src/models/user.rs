@@ -20,6 +20,51 @@ pub struct LoginAttempt {
     pub device_info: String,
 }
 
+pub struct ProfilePreferences {
+    pub language: String, // Language preference, e.g., "en-US", "es-ES", etc.
+    pub language_variant: String, // Language variant or dialect preference
+    pub theme_color: String, // Theme color preference, e.g., "dark", "light"
+    pub font_size: u8, // Font size preference
+    pub email_preferences: EmailPreferences, // Email notification preferences
+    pub privacy_settings: PrivacySettings, // Privacy settings
+    pub content_filtering: ContentFilteringSettings, // Content filtering preferences
+    pub location_settings: LocationSettings, // Location-based services settings
+    pub syncing_preferences: SyncingPreferences, // Data syncing preferences
+    pub backup_settings: BackupSettings, // Data backup preferences
+    pub usage_statistics: UsageStatistics, // Usage statistics preferences
+}
+
+pub struct EmailPreferences {
+    pub frequency: String, // Email frequency preference, e.g., "daily", "weekly", etc.
+    pub types: Vec<String>, // Types of emails to receive, e.g., newsletters, promotions, etc.
+}
+
+pub struct PrivacySettings {
+    pub sharing_level: String, // Privacy sharing level, e.g., "public", "private", etc.
+}
+
+pub struct ContentFilteringSettings {
+    pub filter_types: Vec<String>, // Types of content to filter or block
+}
+
+pub struct LocationSettings {
+    pub permissions: Vec<String>, // Location-based service permissions
+}
+
+pub struct SyncingPreferences {
+    pub platforms: Vec<String>, // Platforms to sync data with
+}
+
+pub struct BackupSettings {
+    pub frequency: String, // Data backup frequency preference, e.g., "daily", "weekly", etc.
+    pub method: String, // Backup method preference, e.g., "cloud", "local", etc.
+}
+
+pub struct UsageStatistics {
+    pub enabled: bool, // Whether usage statistics sharing is enabled
+}
+
+
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct User {

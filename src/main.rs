@@ -30,15 +30,15 @@ async fn main() -> std::io::Result<()> {
     let rate_limiter = RateLimiter::new();
     let route_permissions = get_route_permissions();
 
-    let localization = Localization::new();
+    // let localization = Localization::new();
 
-    let user_lang = "fa-IR"; // For example, this can be dynamically set based on user preference
+    // let user_lang = "de-DE"; // For example, this can be dynamically set based on user preference
 
-    let invalid_credentials_message = localization.get_message(user_lang, "invalid-credentials");
-    let account_locked_message = localization.get_message(user_lang, "account-locked");
+    // let invalid_credentials_message = localization.get_message(user_lang, "invalid-credentials");
+    // let account_locked_message = localization.get_message(user_lang, "account-locked");
 
-    println!("{}", invalid_credentials_message);
-    println!("{}", account_locked_message);
+    // println!("{}", invalid_credentials_message);
+    // println!("{}", account_locked_message);
 
 
     HttpServer::new(move || {
