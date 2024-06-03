@@ -1,6 +1,6 @@
 use std::{collections::HashMap, env};
 use actix_session::Session;
-use actix_web::{http::header, web, HttpResponse, Responder, ResponseError};
+use actix_web::{http::header, web, HttpRequest, HttpResponse, Responder, ResponseError};
 use chrono::{Duration, Utc};
 use mongodb::{
     bson::{self, doc, oid::ObjectId, Bson}, Database
@@ -16,7 +16,7 @@ use otpauth::TOTP;
 use qrcode::{QrCode, render::svg};
 use std::time::{SystemTime, UNIX_EPOCH};
 use reqwest::Client as ReqwestClient; // Correct import for reqwest Client
-use crate::{models::{communication::CommunicationPreferences, user::User}, services::auth::roles::ROLE_USER, utils::{crypto::{decrypt, encrypt}, mfa::{generate_recovery_codes, generate_totp_secret}, oauth::{discord_client, facebook_client, google_client}}};
+use crate::{models::{communication::CommunicationPreferences, user::{LoginAttempt, User}}, services::auth::roles::ROLE_USER, utils::{crypto::{decrypt, encrypt}, mfa::{generate_recovery_codes, generate_totp_secret}, oauth::{discord_client, facebook_client, google_client}, risk_assessment::{assess_login_risk, login_attempt_to_bson, RiskLevel}, verification::generate_otp}};
 use crate::utils::{
     verification::{
         generate_email_verification_token,
@@ -289,6 +289,9 @@ pub async fn register_user(
         failed_login_attempts: 0,
         lockout_until: None,
         permissions: ROLE_USER,
+        login_history: None,
+        otp_code: None,
+        otp_expires_at: None,
     };
 
     if let Some(phone) = &phone {
@@ -376,7 +379,24 @@ impl From<jsonwebtoken::errors::Error> for LoginError {
     }
 }
 
-pub async fn login_user(db: web::Data<Database>, form: web::Json<UserLogin>) -> HttpResponse {
+pub async fn login_user(db: web::Data<Database>, form: web::Json<UserLogin>, req: HttpRequest) -> HttpResponse {
+    // Extract the IP address from the request
+    let ip_address = req
+        .peer_addr()
+        .map(|addr| addr.ip().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    // Extract the User-Agent header from the request
+    let device_info = req
+        .headers()
+        .get("User-Agent")
+        .and_then(|ua| ua.to_str().ok())
+        .unwrap_or_else(|| "unknown")
+        .to_string();
+
+    // @dev TODO: Placeholder for geographic location
+    let geographic_location = "unknown".to_string(); // use a service to get this
+    
     let collection = db.collection::<User>("users");
 
     // Try to find the user by username or email
@@ -409,6 +429,54 @@ pub async fn login_user(db: web::Data<Database>, form: web::Json<UserLogin>) -> 
         }
     }
 
+    // Assess the Request's Risk
+    // Create a new login attempt
+    let user_id = match user.id {
+        Some(id) => id,
+        None => {
+            return HttpResponse::InternalServerError()
+                .body("User ID is None")
+                .into();
+        }
+    };
+    
+    let timestamp = Utc::now().timestamp(); // Update last_logged_in field
+    let login_attempt = LoginAttempt {
+        id: None,
+        ip_address,
+        timestamp,
+        geographic_location,
+        device_info,
+        user_id: user_id.clone(),
+    };
+
+    let risk_level = assess_login_risk(&db, &user_id.to_hex(), &login_attempt).await;
+
+    match risk_level {
+        RiskLevel::High => {
+            let otp = generate_otp();
+            let otp_expires_at = Utc::now().timestamp() + 300; // OTP valid for 5 minutes
+            let update = doc! { "$set": { "otp_code": &otp, "otp_expires_at": otp_expires_at }};
+            let collection = db.collection::<User>("users");
+            if let Err(_) = collection.update_one(doc! { "_id": user_id.clone() }, update, None).await {
+                return HttpResponse::InternalServerError().json(json!({"message": "Failed to update user"}));
+            }
+            // Send OTP to user via email/SMS (implementation needed)
+            return HttpResponse::BadRequest()
+                .json(json!({"message": "Additional verification required. Check your email for the OTP"}));
+        },
+        RiskLevel::Medium => {
+            // @dev TODO:
+            // Trigger additional verification, like request frontend for Capcha check after access!
+            // return HttpResponse::BadRequest()
+            //     .body("Additional verification required, contact developer to handle this ;)")
+            //     .into();
+        },
+        _ => {
+            // Proceed with standard login process
+        }
+    }
+
     if let Ok(valid) = verify(&form.password, &user.password) {
         if valid {
             if user.mfa_enabled.unwrap_or(false) {
@@ -427,13 +495,43 @@ pub async fn login_user(db: web::Data<Database>, form: web::Json<UserLogin>) -> 
                 }
             } else {
                 match create_token(&user.username, user.permissions) {
-                    Ok(token) => {
-                        let timestamp = Utc::now().timestamp(); // Update last_logged_in field
+                    Ok(token) => {                       
+                        
+                        // Convert LoginAttempt to BSON
+                        // let login_attempt_bson: bson::Document = login_attempt_to_bson(&login_attempt);
+
+                        // Insert login attempt into database
+                        let result = db.collection::<LoginAttempt>("login_attempts").insert_one(login_attempt.clone(), None).await;
+                        let login_attempt_id = match result {
+                            Ok(result) => {
+                                match result.inserted_id.as_object_id() {
+                                    Some(object_id) => object_id.clone(),
+                                    None => {
+                                        // Return a server error with a message
+                                        return HttpResponse::InternalServerError().body("Failed to save login attempt");
+                                    }
+                                }
+                            },
+                            Err(_) => {
+                                // Handle the error case when insertion fails
+                                return HttpResponse::InternalServerError().body("Failed to insert login attempt");
+                            }
+                        };
+
+                        // Update user with login attempt id
+                        let login_history_update = if let Some(mut login_history) = user.clone().login_history {
+                            login_history.push(login_attempt_id);
+                            Some(login_history)
+                        } else {
+                            Some(vec![login_attempt_id])
+                        };
+
                         // Update the user in the database
                         let update = doc! { "$set": { 
                             "last_logged_in": timestamp,
                             "failed_login_attempts": 0,
                             "lockout_until": Bson::Null,
+                            "login_history": login_history_update,
                         } };
         
                         if let Err(_) = collection.update_one(filter, update, None).await {
@@ -667,6 +765,37 @@ pub async fn verify_phone(db: web::Data<Database>, form: web::Json<VerifyRequest
 }
 
 
+pub async fn verify_otp(db: web::Data<Database>, user_id: String, provided_otp: String) -> HttpResponse {
+    let collection = db.collection::<User>("users");
+    let user_oid = match ObjectId::parse_str(&user_id) {
+        Ok(oid) => oid,
+        Err(_) => return HttpResponse::BadRequest().json(json!({"message": "Invalid user ID"})),
+    };
+
+    let filter = doc! { "_id": user_oid };
+    let user = match collection.find_one(filter.clone(), None).await {
+        Ok(Some(user)) => user,
+        Ok(None) => return HttpResponse::Unauthorized().json(json!({"message": "User not found"})),
+        Err(_) => return HttpResponse::InternalServerError().json(json!({"message": "Database error"})),
+    };
+
+    if let Some(stored_otp) = user.otp_code {
+        if provided_otp == stored_otp && user.otp_expires_at.unwrap_or(0) > Utc::now().timestamp() {
+            // OTP verified, proceed with granting access
+            // Remove OTP code from user record
+            let update = doc! { "$unset": { "otp_code": "", "otp_expires_at": "" }};
+            collection.update_one(filter, update, None).await.unwrap(); // add error handling
+            HttpResponse::Ok().json(json!({"message": "OTP verified successfully"}))
+        } else {
+            HttpResponse::Unauthorized().json(json!({"message": "Invalid or expired OTP"}))
+        }
+    } else {
+        HttpResponse::Unauthorized().json(json!({"message": "OTP not found"}))
+    }
+}
+
+
+
 /*
   MFA SETUP HANDLER
 */
@@ -780,7 +909,24 @@ pub struct MfaVerificationRequest {
     totp_code: String,
 }
 
-pub async fn verify_mfa(db: web::Data<Database>, user_id: web::Path<String>, form: web::Json<MfaVerificationRequest>) -> HttpResponse {
+pub async fn verify_mfa(db: web::Data<Database>, user_id: web::Path<String>, form: web::Json<MfaVerificationRequest>, req: HttpRequest) -> HttpResponse {
+    // Extract the IP address from the request
+    let ip_address = req
+        .peer_addr()
+        .map(|addr| addr.ip().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    // Extract the User-Agent header from the request
+    let device_info = req
+        .headers()
+        .get("User-Agent")
+        .and_then(|ua| ua.to_str().ok())
+        .unwrap_or_else(|| "unknown")
+        .to_string();
+
+    // @dev TODO: Placeholder for geographic location
+    let geographic_location = "unknown".to_string(); // use a service to get this
+    
     // Retrieve the user's MFA secret from the database
     let collection = db.collection::<User>("users");
     let object_id = match ObjectId::parse_str(user_id.as_ref()) {
@@ -858,6 +1004,54 @@ pub async fn verify_mfa(db: web::Data<Database>, user_id: web::Path<String>, for
         match create_token(&user.username, user.permissions) {
             Ok(token) => {
                 let timestamp = Utc::now().timestamp(); // Update last_logged_in field
+
+                let user_id = match user.id {
+                    Some(id) => id,
+                    None => {
+                        return HttpResponse::InternalServerError()
+                            .body("User ID is None")
+                            .into();
+                    }
+                };
+                
+                let login_attempt = LoginAttempt {
+                    id: None,
+                    ip_address,
+                    timestamp,
+                    geographic_location,
+                    device_info,
+                    user_id: user_id,
+                };
+                
+                // Convert LoginAttempt to BSON
+                // let login_attempt_bson: bson::Document = login_attempt_to_bson(&login_attempt);
+
+                // Insert login attempt into database
+                let result = db.collection::<LoginAttempt>("login_attempts").insert_one(login_attempt.clone(), None).await;
+                let login_attempt_id = match result {
+                    Ok(result) => {
+                        match result.inserted_id.as_object_id() {
+                            Some(object_id) => object_id.clone(),
+                            None => {
+                                // Return a server error with a message
+                                return HttpResponse::InternalServerError().body("Failed to save login attempt");
+                            }
+                        }
+                    },
+                    Err(_) => {
+                        // Handle the error case when insertion fails
+                        return HttpResponse::InternalServerError().body("Failed to insert login attempt");
+                    }
+                };
+
+                // Update user with login attempt id
+                let login_history_update = if let Some(mut login_history) = user.clone().login_history {
+                    login_history.push(login_attempt_id);
+                    Some(login_history)
+                } else {
+                    Some(vec![login_attempt_id])
+                };
+
                 // Update the user in the database
                 let update = doc! {
                     "$set": {
@@ -865,6 +1059,7 @@ pub async fn verify_mfa(db: web::Data<Database>, user_id: web::Path<String>, for
                         "last_logged_in": timestamp,
                         "failed_login_attempts": 0,
                         "lockout_until": Bson::Null,
+                        "login_history": login_history_update,
                     }
                 };
 
@@ -1238,7 +1433,25 @@ pub async fn google_callback(
     db: web::Data<Database>,
     session: Session,
     query: web::Query<OAuth2Params>,
+    req: HttpRequest,
 ) -> impl Responder {
+    // Extract the IP address from the request
+    let ip_address = req
+        .peer_addr()
+        .map(|addr| addr.ip().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    // Extract the User-Agent header from the request
+    let device_info = req
+        .headers()
+        .get("User-Agent")
+        .and_then(|ua| ua.to_str().ok())
+        .unwrap_or_else(|| "unknown")
+        .to_string();
+
+    // @dev TODO: Placeholder for geographic location
+    let geographic_location = "unknown".to_string(); // use a service to get this
+
     let client = match google_client() {
         Ok(client) => client,
         Err(err) => return HttpResponse::InternalServerError().body(format!("Failed to create Google client: {}", err)),
@@ -1305,13 +1518,62 @@ pub async fn google_callback(
                 match create_token(&user.username, user.permissions) {
                     Ok(token) => {
                         let timestamp = Utc::now().timestamp(); // Update last_logged_in field
+                        
+                        let user_id = match user.id {
+                            Some(id) => id,
+                            None => {
+                                return HttpResponse::InternalServerError()
+                                    .body("User ID is None")
+                                    .into();
+                            }
+                        };
+                        
+                        let login_attempt = LoginAttempt {
+                            id: None,
+                            ip_address,
+                            timestamp,
+                            geographic_location,
+                            device_info,
+                            user_id: user_id,
+                        };
+                        
+                        // Convert LoginAttempt to BSON
+                        // let login_attempt_bson: bson::Document = login_attempt_to_bson(&login_attempt);
+        
+                        // Insert login attempt into database
+                        let result = db.collection::<LoginAttempt>("login_attempts").insert_one(login_attempt.clone(), None).await;
+                        let login_attempt_id = match result {
+                            Ok(result) => {
+                                match result.inserted_id.as_object_id() {
+                                    Some(object_id) => object_id.clone(),
+                                    None => {
+                                        // Return a server error with a message
+                                        return HttpResponse::InternalServerError().body("Failed to save login attempt");
+                                    }
+                                }
+                            },
+                            Err(_) => {
+                                // Handle the error case when insertion fails
+                                return HttpResponse::InternalServerError().body("Failed to insert login attempt");
+                            }
+                        };
+        
+                        // Update user with login attempt id
+                        let login_history_update = if let Some(mut login_history) = user.clone().login_history {
+                            login_history.push(login_attempt_id);
+                            Some(login_history)
+                        } else {
+                            Some(vec![login_attempt_id])
+                        };
+        
                         // Update the user in the database
-                        let filter = doc! { "_id": user.id.clone() };
                         let update = doc! { "$set": { 
                             "last_logged_in": timestamp,
                             "failed_login_attempts": 0,
-                            "lockout_until": Bson::Null, 
+                            "lockout_until": Bson::Null,
+                            "login_history": login_history_update,
                         } };
+                        let filter = doc! { "_id": user.id.clone() };
         
                         if let Err(_) = collection.update_one(filter, update, None).await {
                             return HttpResponse::InternalServerError().finish();
@@ -1351,6 +1613,9 @@ pub async fn google_callback(
                 failed_login_attempts: 0,
                 lockout_until: None,
                 permissions: ROLE_USER,
+                login_history: None,
+                otp_code: None,
+                otp_expires_at: None,
             };
             let insert_result = collection.insert_one(new_user.clone(), None).await;
 
@@ -1412,7 +1677,25 @@ pub async fn facebook_callback(
     db: web::Data<Database>,
     session: Session,
     query: web::Query<OAuth2Params>,
+    req: HttpRequest,
 ) -> impl Responder {
+    // Extract the IP address from the request
+    let ip_address = req
+        .peer_addr()
+        .map(|addr| addr.ip().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    // Extract the User-Agent header from the request
+    let device_info = req
+        .headers()
+        .get("User-Agent")
+        .and_then(|ua| ua.to_str().ok())
+        .unwrap_or_else(|| "unknown")
+        .to_string();
+
+    // @dev TODO: Placeholder for geographic location
+    let geographic_location = "unknown".to_string(); // use a service to get this
+
     let client = match facebook_client() {
         Ok(client) => client,
         Err(err) => return HttpResponse::InternalServerError().body(format!("Failed to create Facebook client: {}", err)),
@@ -1476,13 +1759,62 @@ pub async fn facebook_callback(
                 match create_token(&user.username, user.permissions) {
                     Ok(token) => {
                         let timestamp = Utc::now().timestamp(); // Update last_logged_in field
+                        let user_id = match user.id {
+                            Some(id) => id,
+                            None => {
+                                return HttpResponse::InternalServerError()
+                                    .body("User ID is None")
+                                    .into();
+                            }
+                        };
+                        
+                        let login_attempt = LoginAttempt {
+                            id: None,
+                            ip_address,
+                            timestamp,
+                            geographic_location,
+                            device_info,
+                            user_id: user_id,
+                        };
+                        
+                        // Convert LoginAttempt to BSON
+                        // let login_attempt_bson: bson::Document = login_attempt_to_bson(&login_attempt);
+        
+                        // Insert login attempt into database
+                        let result = db.collection::<LoginAttempt>("login_attempts").insert_one(login_attempt.clone(), None).await;
+                        let login_attempt_id = match result {
+                            Ok(result) => {
+                                match result.inserted_id.as_object_id() {
+                                    Some(object_id) => object_id.clone(),
+                                    None => {
+                                        // Return a server error with a message
+                                        return HttpResponse::InternalServerError().body("Failed to save login attempt");
+                                    }
+                                }
+                            },
+                            Err(_) => {
+                                // Handle the error case when insertion fails
+                                return HttpResponse::InternalServerError().body("Failed to insert login attempt");
+                            }
+                        };
+        
+                        // Update user with login attempt id
+                        let login_history_update = if let Some(mut login_history) = user.clone().login_history {
+                            login_history.push(login_attempt_id);
+                            Some(login_history)
+                        } else {
+                            Some(vec![login_attempt_id])
+                        };
+        
                         // Update the user in the database
-                        let filter = doc! { "_id": user.id.clone() };
                         let update = doc! { "$set": { 
                             "last_logged_in": timestamp,
                             "failed_login_attempts": 0,
-                            "lockout_until": Bson::Null, 
+                            "lockout_until": Bson::Null,
+                            "login_history": login_history_update,
                         } };
+                        let filter = doc! { "_id": user.id.clone() };
+                        
         
                         if let Err(_) = collection.update_one(filter, update, None).await {
                             return HttpResponse::InternalServerError().finish();
@@ -1520,6 +1852,9 @@ pub async fn facebook_callback(
                 failed_login_attempts: 0,
                 lockout_until: None,
                 permissions: ROLE_USER,
+                login_history: None,
+                otp_code: None,
+                otp_expires_at: None,
             };
             let insert_result = collection.insert_one(new_user.clone(), None).await;
 
@@ -1580,7 +1915,25 @@ pub async fn discord_callback(
     db: web::Data<Database>,
     session: Session,
     query: web::Query<OAuth2Params>,
+    req: HttpRequest,
 ) -> impl Responder {
+    // Extract the IP address from the request
+    let ip_address = req
+        .peer_addr()
+        .map(|addr| addr.ip().to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    // Extract the User-Agent header from the request
+    let device_info = req
+        .headers()
+        .get("User-Agent")
+        .and_then(|ua| ua.to_str().ok())
+        .unwrap_or_else(|| "unknown")
+        .to_string();
+
+    // @dev TODO: Placeholder for geographic location
+    let geographic_location = "unknown".to_string(); // use a service to get this
+    
     let client = match discord_client() {
         Ok(client) => client,
         Err(err) => return HttpResponse::InternalServerError().body(format!("Failed to create Discord client: {}", err)),
@@ -1644,13 +1997,63 @@ pub async fn discord_callback(
                 match create_token(&user.username, user.permissions) {
                     Ok(token) => {
                         let timestamp = Utc::now().timestamp(); // Update last_logged_in field
+                        
+                        let user_id = match user.id {
+                            Some(id) => id,
+                            None => {
+                                return HttpResponse::InternalServerError()
+                                    .body("User ID is None")
+                                    .into();
+                            }
+                        };
+                        
+                        let login_attempt = LoginAttempt {
+                            id: None,
+                            ip_address,
+                            timestamp,
+                            geographic_location,
+                            device_info,
+                            user_id: user_id,
+                        };
+                        
+                        // Convert LoginAttempt to BSON
+                        // let login_attempt_bson: bson::Document = login_attempt_to_bson(&login_attempt);
+
+                        // Insert login attempt into database
+                        let result = db.collection::<LoginAttempt>("login_attempts").insert_one(login_attempt.clone(), None).await;
+                        let login_attempt_id = match result {
+                            Ok(result) => {
+                                match result.inserted_id.as_object_id() {
+                                    Some(object_id) => object_id.clone(),
+                                    None => {
+                                        // Return a server error with a message
+                                        return HttpResponse::InternalServerError().body("Failed to save login attempt");
+                                    }
+                                }
+                            },
+                            Err(_) => {
+                                // Handle the error case when insertion fails
+                                return HttpResponse::InternalServerError().body("Failed to insert login attempt");
+                            }
+                        };
+
+                        // Update user with login attempt id
+                        let login_history_update = if let Some(mut login_history) = user.clone().login_history {
+                            login_history.push(login_attempt_id);
+                            Some(login_history)
+                        } else {
+                            Some(vec![login_attempt_id])
+                        };
+
                         // Update the user in the database
-                        let filter = doc! { "_id": user.id.clone() };
                         let update = doc! { "$set": { 
                             "last_logged_in": timestamp,
                             "failed_login_attempts": 0,
-                            "lockout_until": Bson::Null, 
+                            "lockout_until": Bson::Null,
+                            "login_history": login_history_update,
                         } };
+                        
+                        let filter = doc! { "_id": user.id.clone() };
         
                         if let Err(_) = collection.update_one(filter, update, None).await {
                             return HttpResponse::InternalServerError().finish();
@@ -1688,6 +2091,9 @@ pub async fn discord_callback(
                 failed_login_attempts: 0,
                 lockout_until: None,
                 permissions: ROLE_USER,
+                login_history: None,
+                otp_code: None,
+                otp_expires_at: None,
             };
             let insert_result = collection.insert_one(new_user.clone(), None).await;
 

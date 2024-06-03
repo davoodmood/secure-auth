@@ -1,8 +1,8 @@
 use actix_web::{
-    body::EitherBody, dev::{forward_ready, Service, ServiceRequest, ServiceResponse, Transform}, error::ErrorInternalServerError, http::StatusCode, web, Error, HttpResponse
+    body::EitherBody, dev::{forward_ready, Service, ServiceRequest, ServiceResponse, Transform}, error::ErrorInternalServerError, http::StatusCode, Error, HttpResponse
 };
 use std::future::{ready, Ready};
-use futures::{future::LocalBoxFuture, FutureExt};
+use futures::future::LocalBoxFuture;
 use std::{collections::HashMap, sync::Arc};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};

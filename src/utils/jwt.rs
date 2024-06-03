@@ -13,7 +13,8 @@ pub struct Claims {
     pub permissions: i32,
 }
 
-pub struct ResetClaims {
+pub struct 
+_ResetClaims {
     pub sub: String,
     pub exp: usize,
 }

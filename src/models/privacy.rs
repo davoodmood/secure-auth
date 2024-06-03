@@ -1,3 +1,17 @@
+/*
+    Compliance and Privacy Considerations:
+
+    Ensure your authentication system complies with relevant regulations and standards 
+    such as GDPR, HIPAA, or PCI DSS, depending on your application's domain and geography.
+
+    Implementation Tip:
+    - Implement features like data encryption at rest and in transit, audit logs, and user consent flows.
+    - Regularly review and update your practices to remain compliant with changing regulations.
+
+*/
+
+
+
 // use chrono::{DateTime, Utc};
 use serde::{Serialize, Deserialize};
 use mongodb::bson::oid::ObjectId;

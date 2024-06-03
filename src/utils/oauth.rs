@@ -1,4 +1,4 @@
-use oauth2::{ClientId, ClientSecret, RedirectUrl, AuthUrl, TokenUrl, AuthorizationCode, CsrfToken};
+use oauth2::{ClientId, ClientSecret, RedirectUrl, AuthUrl, TokenUrl};
 use oauth2::basic::BasicClient;
 use std::env;
 

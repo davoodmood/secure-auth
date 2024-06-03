@@ -6,3 +6,4 @@ pub mod txt;
 pub mod mfa;
 pub mod oauth;
 pub mod permissions;
+pub mod risk_assessment;
