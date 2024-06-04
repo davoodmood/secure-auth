@@ -95,7 +95,7 @@ where
                     return Ok(res);
                 }
                 Err(_) => {
-                    let http_res = HttpResponse::Unauthorized().body("Unauthorized").map_into_right_body();
+                    let http_res = HttpResponse::Unauthorized().body("Unauthorized Access").map_into_right_body();
                     let res = ServiceResponse::new(http_req, http_res);
                     return Ok(res);
                 }
